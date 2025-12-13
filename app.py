@@ -327,7 +327,7 @@ class SmartBraintreeChecker:
                 error_msg = f"Registration Form Not Found (404/No Nonce) - {last_error}"
                 logger.error(error_msg)
                 if last_html:
-                    logger.error(f"=== FULL HTML RESPONSE ===\n{last_html}")  # Fixed: Added line break
+                    logger.error(f"=== FULL HTML RESPONSE ===\n{last_html}")
                 return False, error_msg
             
             tokens = self.extract_tokens(html)
@@ -337,7 +337,7 @@ class SmartBraintreeChecker:
             if not register_nonce and not ur_frontend_form_nonce:
                 error_msg = "Registration Form Not Found (404/No Nonce) - No registration token found"
                 logger.error(error_msg)
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")  # Fixed: Added line break
+                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
                 return False, error_msg
             
             headers = self.base_headers.copy()
@@ -433,7 +433,7 @@ class SmartBraintreeChecker:
             tokens = self.extract_tokens(html)
             if not tokens.get('edit_address_nonce'):
                 logger.error("No address token found")
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")  # Fixed: Added line break
+                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
                 return False, "No address token"
             
             headers = self.base_headers.copy()
@@ -525,14 +525,14 @@ class SmartBraintreeChecker:
                 
                 if not add_payment_nonce:
                     logger.error("No payment nonce found")
-                    logger.error(f"=== FULL PAYMENT PAGE HTML ===\n{html}")  # Fixed: Added line break
+                    logger.error(f"=== FULL PAYMENT PAGE HTML ===\n{html}")
                     return None, None, "No payment nonce"
                 
                 # Try to extract embedded client token
                 patterns = [
                     r'braintree_client_token\s*=\s*\["([^"]+)"\]',
-                    r'var\s+clientToken\s*=\s*["']([^"']+)["']',
-                    r'["']clientToken["']:\s*["']([^"']+)["']'
+                    r'var\s+clientToken\s*=\s*["\']([^"\']+)["\']',
+                    r'["\']clientToken["\']:\s*["\']([^"\']+)["\']'
                 ]
                 
                 client_token = None
