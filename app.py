@@ -23,7 +23,7 @@ from faker import Faker
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize
@@ -272,6 +272,7 @@ class SmartBraintreeChecker:
             html = None
             working_reg_url = None
             last_error = None
+            last_html = None
             
             # Try each URL until we find one with a registration form
             for reg_url in reg_urls:
@@ -281,6 +282,18 @@ class SmartBraintreeChecker:
                         last_error = f"HTTP Error: {test_html}"
                         logger.debug(f"URL {reg_url} failed: {last_error}")
                         continue
+                    
+                    # Log the full HTML response for debugging
+                    logger.info(f"=== HTML RESPONSE FROM {reg_url} ===")
+                    logger.info(f"Response length: {len(test_html)} characters")
+                    logger.info(f"Contains 'woocommerce-register-nonce': {'woocommerce-register-nonce' in test_html}")
+                    logger.info(f"Contains 'register' form: {'<form' in test_html.lower()}")
+                    logger.info(f"Contains 'input' tags: {'<input' in test_html.lower()}")
+                    
+                    # Log first 500 characters for quick inspection
+                    logger.info(f"First 500 chars: {test_html[:500]}")
+                    
+                    last_html = test_html
                     
                     if 'woocommerce-register-nonce' in test_html:
                         html = test_html
@@ -296,11 +309,18 @@ class SmartBraintreeChecker:
                     continue
             
             if not html or not working_reg_url:
-                return False, f"Registration Form Not Found (404/No Nonce) - {last_error}"
+                error_msg = f"Registration Form Not Found (404/No Nonce) - {last_error}"
+                logger.error(error_msg)
+                if last_html:
+                    logger.error(f"=== FULL HTML RESPONSE ===\n{last_html}")
+                return False, error_msg
             
             tokens = self.extract_tokens(html)
             if not tokens.get('register_nonce'):
-                return False, "Registration Form Not Found (404/No Nonce) - No registration token found"
+                error_msg = "Registration Form Not Found (404/No Nonce) - No registration token found"
+                logger.error(error_msg)
+                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
+                return False, error_msg
             
             headers = self.base_headers.copy()
             headers.update({
@@ -344,6 +364,9 @@ class SmartBraintreeChecker:
                 result = await response.text()
                 final_url = str(response.url)
                 
+                # Log the result
+                logger.info(f"Registration result: {result[:200]}...")
+                
                 # Check multiple success indicators
                 if any(x in result for x in ['Log out', 'logout', 'Dashboard', 'My Account', 'my-account/edit-address']):
                     if 'login' not in final_url.lower() or 'my-account' in final_url.lower():
@@ -360,7 +383,9 @@ class SmartBraintreeChecker:
                 return False, "Registration form submitted but no success confirmation"
                 
         except Exception as e:
-            return False, f"Registration Form Not Found (404/No Nonce) - {str(e)[:50]}"
+            error_msg = f"Registration Form Not Found (404/No Nonce) - {str(e)[:50]}"
+            logger.error(error_msg)
+            return False, error_msg
     
     async def update_billing_address(self, user_data):
         """Update billing address with auto-detection"""
@@ -374,6 +399,8 @@ class SmartBraintreeChecker:
             
             tokens = self.extract_tokens(html)
             if not tokens.get('edit_address_nonce'):
+                logger.error("No address token found")
+                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
                 return False, "No address token"
             
             headers = self.base_headers.copy()
@@ -449,6 +476,12 @@ class SmartBraintreeChecker:
                 html = await response.text()
                 final_url = str(response.url)
                 
+                # Log the payment page response
+                logger.info(f"=== PAYMENT PAGE RESPONSE ===")
+                logger.info(f"Response length: {len(html)} characters")
+                logger.info(f"Contains 'woocommerce-add-payment-method-nonce': {'woocommerce-add-payment-method-nonce' in html}")
+                logger.info(f"Contains 'braintree' indicators: {'braintree' in html.lower()}")
+                
                 # Check if redirected to login
                 if 'login' in final_url.lower() and 'add-payment' not in final_url.lower():
                     return None, None, "Requires authentication"
@@ -458,6 +491,8 @@ class SmartBraintreeChecker:
                 add_payment_nonce = tokens.get('add_payment_nonce')
                 
                 if not add_payment_nonce:
+                    logger.error("No payment nonce found")
+                    logger.error(f"=== FULL PAYMENT PAGE HTML ===\n{html}")
                     return None, None, "No payment nonce"
                 
                 # Try to extract embedded client token
