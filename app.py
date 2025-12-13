@@ -197,6 +197,7 @@ class SmartBraintreeChecker:
     def extract_tokens(self, html):
         """Extract CSRF tokens from HTML"""
         tokens = {}
+        # Try WooCommerce nonces first
         patterns = {
             'register_nonce': r'name="woocommerce-register-nonce" value="([^"]+)"',
             'login_nonce': r'name="woocommerce-login-nonce" value="([^"]+)"',
@@ -207,6 +208,18 @@ class SmartBraintreeChecker:
         for key, pattern in patterns.items():
             match = re.search(pattern, html)
             tokens[key] = match.group(1) if match else None
+        
+        # Try User Registration plugin nonces if WooCommerce not found
+        if not tokens.get('register_nonce'):
+            ur_patterns = {
+                'ur_frontend_form_nonce': r'name="ur_frontend_form_nonce" value="([^"]+)"',
+                'ur-register-nonce': r'name="ur-register-nonce" value="([^"]+)"',
+                'ur-login-nonce': r'name="ur-login-nonce" value="([^"]+)"'
+            }
+            for key, pattern in ur_patterns.items():
+                match = re.search(pattern, html)
+                tokens[key] = match.group(1) if match else None
+        
         return tokens
     
     async def detect_braintree_config(self):
@@ -287,15 +300,16 @@ class SmartBraintreeChecker:
                     logger.info(f"=== HTML RESPONSE FROM {reg_url} ===")
                     logger.info(f"Response length: {len(test_html)} characters")
                     logger.info(f"Contains 'woocommerce-register-nonce': {'woocommerce-register-nonce' in test_html}")
-                    logger.info(f"Contains 'register' form: {'<form' in test_html.lower()}")
-                    logger.info(f"Contains 'input' tags: {'<input' in test_html.lower()}")
+                    logger.info(f"Contains 'ur_frontend_form_nonce': {'ur_frontend_form_nonce' in test_html}")
+                    logger.info(f"Contains 'user-registration-form': {'user-registration-form' in test_html}")
                     
                     # Log first 500 characters for quick inspection
                     logger.info(f"First 500 chars: {test_html[:500]}")
                     
                     last_html = test_html
                     
-                    if 'woocommerce-register-nonce' in test_html:
+                    # Check for either WooCommerce or User Registration forms
+                    if 'woocommerce-register-nonce' in test_html or 'ur_frontend_form_nonce' in test_html or 'user-registration-form' in test_html:
                         html = test_html
                         working_reg_url = reg_url
                         logger.info(f"Found registration form at: {reg_url}")
@@ -316,7 +330,10 @@ class SmartBraintreeChecker:
                 return False, error_msg
             
             tokens = self.extract_tokens(html)
-            if not tokens.get('register_nonce'):
+            register_nonce = tokens.get('register_nonce')
+            ur_frontend_form_nonce = tokens.get('ur_frontend_form_nonce')
+            
+            if not register_nonce and not ur_frontend_form_nonce:
                 error_msg = "Registration Form Not Found (404/No Nonce) - No registration token found"
                 logger.error(error_msg)
                 logger.error(f"=== FULL HTML RESPONSE ===\n{html}")
@@ -329,23 +346,38 @@ class SmartBraintreeChecker:
                 'referer': working_reg_url
             })
             
-            # Build flexible registration form
-            form_data = {
-                'email': user_data['email'],
-                'woocommerce-register-nonce': tokens['register_nonce'],
-                '_wp_http_referer': tokens.get('wp_referer', '/my-account/'),
-                'register': 'Register'
-            }
+            # Build flexible registration form based on detected system
+            form_data = {}
             
-            # Check what fields are required in the form
-            if 'name="username"' in html or 'name="reg_username"' in html:
-                form_data['username'] = user_data['email'].split('@')[0]
+            if register_nonce:  # WooCommerce
+                form_data = {
+                    'email': user_data['email'],
+                    'woocommerce-register-nonce': register_nonce,
+                    '_wp_http_referer': tokens.get('wp_referer', '/my-account/'),
+                    'register': 'Register'
+                }
+                
+                # Check what fields are required in the form
+                if 'name="username"' in html or 'name="reg_username"' in html:
+                    form_data['username'] = user_data['email'].split('@')[0]
+                
+                if 'name="password"' in html or 'name="reg_password"' in html:
+                    form_data['password'] = user_data['password']
+                
+                if 'name="email_2"' in html:
+                    form_data['email_2'] = ''
             
-            if 'name="password"' in html or 'name="reg_password"' in html:
-                form_data['password'] = user_data['password']
-            
-            if 'name="email_2"' in html:
-                form_data['email_2'] = ''
+            else:  # User Registration plugin
+                form_data = {
+                    'user_email': user_data['email'],
+                    'ur_frontend_form_nonce': ur_frontend_form_nonce,
+                    'ur-register-nonce': tokens.get('ur-register-nonce', ''),
+                    'first_name': user_data['first_name'],
+                    'last_name': user_data['last_name'],
+                    'user_pass': user_data['password'],
+                    'user_confirm_pass': user_data['password'],
+                    'submit': 'Register'
+                }
             
             # Add WooCommerce attribution
             form_data.update({
