@@ -271,25 +271,36 @@ class SmartBraintreeChecker:
             
             html = None
             working_reg_url = None
+            last_error = None
             
             # Try each URL until we find one with a registration form
             for reg_url in reg_urls:
                 try:
                     success, test_html = await self.get_page(reg_url)
-                    if success and 'woocommerce-register-nonce' in test_html:
+                    if not success:
+                        last_error = f"HTTP Error: {test_html}"
+                        logger.debug(f"URL {reg_url} failed: {last_error}")
+                        continue
+                    
+                    if 'woocommerce-register-nonce' in test_html:
                         html = test_html
                         working_reg_url = reg_url
                         logger.info(f"Found registration form at: {reg_url}")
                         break
-                except:
+                    else:
+                        last_error = "No registration form found"
+                        logger.debug(f"URL {reg_url} has no registration form")
+                except Exception as e:
+                    last_error = f"Exception: {str(e)[:50]}"
+                    logger.debug(f"URL {reg_url} failed: {last_error}")
                     continue
             
             if not html or not working_reg_url:
-                return False, "No registration form found"
+                return False, f"Registration Form Not Found (404/No Nonce) - {last_error}"
             
             tokens = self.extract_tokens(html)
             if not tokens.get('register_nonce'):
-                return False, "No registration token found"
+                return False, "Registration Form Not Found (404/No Nonce) - No registration token found"
             
             headers = self.base_headers.copy()
             headers.update({
@@ -349,8 +360,7 @@ class SmartBraintreeChecker:
                 return False, "Registration form submitted but no success confirmation"
                 
         except Exception as e:
-            return False, f"Registration error: {str(e)[:50]}"
-
+            return False, f"Registration Form Not Found (404/No Nonce) - {str(e)[:50]}"
     
     async def update_billing_address(self, user_data):
         """Update billing address with auto-detection"""
