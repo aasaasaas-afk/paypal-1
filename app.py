@@ -7,6 +7,7 @@ import json
 import random
 import urllib3
 from flask import Flask, jsonify, request
+import os
 
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -341,6 +342,7 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Flask server running on http://localhost:5000")
-    print("Use endpoint: /gate=b3/cc={card}")
-    app.run(debug=True, port=5000)
+    # Get port from environment variable or use default 5000
+    port = int(os.environ.get('PORT', 5000))
+    # Bind to 0.0.0.0 for external access and disable debug mode
+    app.run(host='0.0.0.0', port=port, debug=False)
