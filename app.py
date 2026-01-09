@@ -15,8 +15,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Proxy configuration (Preserved from original)
 proxies = {
-    'http': 'Quantum-hxj1k7ym:rcXI8L03pBjMbCqkQtyx_country-US@schro.quantumproxies.net:1111',
-    'https': 'Quantum-hxj1k7ym:rcXI8L03pBjMbCqkQtyx_country-US@schro.quantumproxies.net:1111'
+    'http': 'http://25chilna:password@209.174.185.196:6226',
+    'https': 'http://25chilna:password@209.174.185.196:6226'
 }
 
 # Initialize Flask app
