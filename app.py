@@ -120,7 +120,6 @@ class BraintreeLoginChecker:
             ]
             
             for pattern in patterns:
-                # Ensure response_text is valid for regex
                 if not isinstance(response_text, str):
                     continue
                     
@@ -204,15 +203,18 @@ class BraintreeLoginChecker:
         
         if response.status_code == 200:
             try:
-                token_data = response.json()
-                # Check if token_data is None to avoid "not iterable" error
-                if token_data is None:
+                response_data = response.json()
+                
+                # FIX: Check if response_data is None before trying to access keys
+                if response_data is None:
                     return None
-                    
-                if 'data' in token_data and 'tokenizeCreditCard' in token_data['data']:
-                    token = token_data['data']['tokenizeCreditCard']['token']
-                    return token
-                elif 'errors' in token_data:
+                
+                if 'data' in response_data and response_data['data'] is not None:
+                    if 'tokenizeCreditCard' in response_data['data']:
+                        if response_data['data']['tokenizeCreditCard'] is not None:
+                            token = response_data['data']['tokenizeCreditCard'].get('token')
+                            return token
+                elif 'errors' in response_data:
                     return None
             except json.JSONDecodeError:
                 return None
