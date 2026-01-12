@@ -13,11 +13,29 @@ import urllib3
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Proxy configuration (Preserved from original)
+# --- New Proxy Configuration ---
+raw_proxies_list = [
+    "142.111.48.253:7030:nicubbvn:cjrkvyokt7p9",
+    "23.95.150.145:6114:nicubbvn:cjrkvyokt7p9",
+    "198.23.239.134:6540:nicubbvn:cjrkvyokt7p9",
+    "107.172.163.27:6543:nicubbvn:cjrkvyokt7p9",
+    "198.105.121.200:6462:nicubbvn:cjrkvyokt7p9",
+    "64.137.96.74:6641:nicubbvn:cjrkvyokt7p9",
+    "84.247.60.125:6095:nicubbvn:cjrkvyokt7p9",
+    "216.10.27.159:6837:nicubbvn:cjrkvyokt7p9",
+    "23.26.71.145:5628:nicubbvn:cjrkvyokt7p9",
+    "23.27.208.120:5830:nicubbvn:cjrkvyokt7p9"
+]
+
+# Select a random proxy from the list and format it
+selected_proxy = random.choice(raw_proxies_list)
+ip, port, user, password = selected_proxy.split(':')
+proxy_url = f"http://{user}:{password}@{ip}:{port}"
+
 proxies = {
-    'http': 'http://25chilna:password@209.174.185.196:6226',
-    'https': 'http://25chilna:password@209.174.185.196:6226'
+    'http': proxy_url,
 }
+# -------------------------------
 
 # Initialize Flask app
 app = Flask(__name__)
