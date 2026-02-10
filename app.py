@@ -83,7 +83,7 @@ async def get_card_response(cc_number):
         await pyrogram_client.send_message(TARGET_BOT, f"/chk {cc_number}")
         
         logger.info("Command sent. Waiting 5 seconds...")
-        await asyncio.sleep(5)
+        await asyncio.sleep(7)
         
         logger.info("Fetching chat history...")
         async for message in pyrogram_client.get_chat_history(TARGET_BOT, limit=1):
