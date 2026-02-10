@@ -109,7 +109,7 @@ async def get_card_response(cc_number):
 
 # ─── FLASK ROUTES ───
 
-@app.route('/gate=b3/cc/<path:cc_details>')
+@app.route('/gate=b3/cc=<path:cc_details>')
 def check_gate_b3(cc_details):
     try:
         start_time = time.time()
