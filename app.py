@@ -35,7 +35,6 @@ def run_pyrogram_background():
     """
     This function runs in a separate thread.
     It creates its own Event Loop and Pyrogram Client.
-    This prevents 'attached to a different loop' errors.
     """
     global loop, pyrogram_client
     
@@ -55,26 +54,26 @@ def run_pyrogram_background():
     )
 
     try:
-        # 3. Start the client
+        # 3. Start the client SYNCHRONOUSLY (Pyrogram v2 start() is sync)
         logger.info("Background thread: Starting Pyrogram...")
-        loop.run_until_complete(pyrogram_client.start())
+        pyrogram_client.start()
         
-        # Check if we are actually logged in
+        # Check if we are actually logged in (get_me is ASYNC)
         me = loop.run_until_complete(pyrogram_client.get_me())
         logger.info(f"✅ Background thread: Connected as {me.first_name} (ID: {me.id})")
         
         # Signal that we are ready
         startup_event.set()
         
-        # Keep the loop running
+        # Keep the loop running to handle async requests from Flask
         loop.run_forever()
         
     except Exception as e:
         logger.critical(f"Background thread: Failed to start - {e}")
+        logger.critical(f"Ensure your Session String is valid and not banned.")
         startup_event.set() # Release lock even on failure
 
 # Start the background thread immediately when the module loads
-# This ensures it's ready before Gunicorn starts accepting requests
 t = threading.Thread(target=run_pyrogram_background, daemon=True)
 t.start()
 
