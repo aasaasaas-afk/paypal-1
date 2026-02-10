@@ -26,81 +26,69 @@ logger = logging.getLogger(__name__)
 logging.getLogger("pyrogram").setLevel(logging.CRITICAL)
 
 # ─── ASYNCIO BACKGROUND MANAGER ───
-# We store the loop and client here. They will be initialized in the thread.
 loop = None
 pyrogram_client = None
 startup_event = threading.Event()
 
 def run_pyrogram_background():
     """
-    This function runs in a separate thread.
-    It creates its own Event Loop and Pyrogram Client.
+    Runs Pyrogram in a background thread with its own loop.
     """
     global loop, pyrogram_client
     
-    # 1. Create a new event loop for this thread
+    # 1. Create loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     logger.info("Background thread: Loop created.")
 
-    # 2. Instantiate the Client INSIDE this thread
+    # 2. Instantiate Client (REMOVED workers argument to fix compatibility)
     pyrogram_client = Client(
         name="user_session",
         api_id=API_ID,
         api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        workers=1000
+        session_string=SESSION_STRING
     )
 
     try:
-        # 3. Start the client SYNCHRONOUSLY (Pyrogram v2 start() is sync)
+        # 3. Start Client (Pyrogram v2 start() is synchronous)
         logger.info("Background thread: Starting Pyrogram...")
         pyrogram_client.start()
         
-        # Check if we are actually logged in (get_me is ASYNC)
-        me = loop.run_until_complete(pyrogram_client.get_me())
-        logger.info(f"✅ Background thread: Connected as {me.first_name} (ID: {me.id})")
+        logger.info("✅ Background thread: Pyrogram Connected Successfully.")
         
-        # Signal that we are ready
+        # Signal Flask that we are ready
         startup_event.set()
         
-        # Keep the loop running to handle async requests from Flask
+        # Keep the loop running
         loop.run_forever()
         
     except Exception as e:
         logger.critical(f"Background thread: Failed to start - {e}")
-        logger.critical(f"Ensure your Session String is valid and not banned.")
-        startup_event.set() # Release lock even on failure
+        logger.critical(f"Check if your Session String is valid/banned.")
+        startup_event.set()
 
-# Start the background thread immediately when the module loads
+# Start the thread
 t = threading.Thread(target=run_pyrogram_background, daemon=True)
 t.start()
 
 # ─── HELPER FUNCTIONS ───
 
 async def get_card_response(cc_number):
-    """
-    Sends command to bot, waits 5s, fetches and parses response.
-    """
     try:
         if not pyrogram_client.is_connected:
             raise Exception("Pyrogram client is disconnected")
             
         logger.info(f"Sending /chk {cc_number} to {TARGET_BOT}...")
-        
-        # Send Command
         await pyrogram_client.send_message(TARGET_BOT, f"/chk {cc_number}")
         
         logger.info("Command sent. Waiting 5 seconds...")
         await asyncio.sleep(5)
         
         logger.info("Fetching chat history...")
-        # Get History
         async for message in pyrogram_client.get_chat_history(TARGET_BOT, limit=1):
             full_text = message.text or ""
             
-            # Extract "Response:" line
             extracted = "No response found"
             for line in full_text.splitlines():
                 if line.strip().startswith("Response:"):
@@ -111,7 +99,6 @@ async def get_card_response(cc_number):
             return extracted
             
     except KeyError as e:
-        # Handle "Username not found" specifically
         logger.error(f"Username Resolution Error: {e}")
         return "Error: Bot username not found or account restricted."
     except Exception as e:
@@ -127,14 +114,13 @@ def check_gate_b3(cc_details):
     try:
         start_time = time.time()
         
-        # Clean input: Remove leading '=' if present
         if cc_details.startswith("="):
             cc_details = cc_details[1:]
             
         logger.info(f"--- New Request ---")
         logger.info(f"Card Details: {cc_details}")
         
-        # Wait for the background thread to be ready (just in case)
+        # Wait for pyrogram to be ready
         if not startup_event.is_set():
             logger.warning("Pyrogram not ready yet. Waiting 2s...")
             startup_event.wait(timeout=2)
@@ -142,34 +128,27 @@ def check_gate_b3(cc_details):
         if loop is None or pyrogram_client is None:
              return jsonify({"error": "Service Unavailable: Userbot not initialized"}), 503
 
-        # Run the async function in the background loop
+        # Run async task in background loop
         future = asyncio.run_coroutine_threadsafe(get_card_response(cc_details), loop)
         raw_response = future.result(timeout=30) 
         
-        # 2. Determine Status and Final Response Text
+        # Process Response
         final_response_text = raw_response
         status = "DECLINED"
         
-        # Logic: "Too many purchase attempts..."
         if "Too many purchase attempts" in raw_response:
             final_response_text = "Server Overloaded please wait for few minutes......"
             status = "DECLINED"
-            
-        # Logic: "Card added"
         elif "Card added" in raw_response:
             status = "APPROVED"
             final_response_text = "Payment method added"
-            
-        # Logic: "Username not found"
         elif "Username not found" in raw_response:
             status = "ERROR"
             final_response_text = "Restricted Account / Bot Not Found"
 
-        # 3. Calculate Time
         end_time = time.time()
         duration = f"{end_time - start_time:.2f}s"
         
-        # 4. Return JSON
         result = {
             "response": final_response_text,
             "status": status,
