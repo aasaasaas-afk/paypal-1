@@ -3,12 +3,14 @@ import time
 import json
 import logging
 import sys
+import traceback
 from flask import Flask, jsonify
 from pyrogram import Client
 
 # ─── CONFIGURATION ───
 API_ID = 39761812
 API_HASH = "08eb23e7f0599533829fbd4b6f2d8eb5"
+# Updated Session String
 SESSION_STRING = "AQJQHbUAVozpsy2SLcoBegHKFdc1a2xG44y36_ZU9-E-bQ2q1cGe2G_bH4DtmFskTn0wu8iOuNAoyrtcwKGW-_iY1CIVgjvT3QDZoOqCpg1LEy4YbyVb3E8Bf-Hzk5nHpWshKtWGSgLeBe5qx-oTEPOkZ-nDjiDMkenP7pbWT5znX_Z0q_c98Z2pYHFtqGvbLGG16tgwhSiT7JvvkSJUbXo56RgjnZEJb_UTLR1w24V0VW6moHUuS5pEzAmJPkn-tesvjk7I9mE-q_dWxqxz0PQpcPqGzUlgXt3YIL_l59PwlLsuNjP-2-F3v7iARnbNTHWDLuh5iHaDDGrKxocx_bD18w2nhgAAAAHraX5JAA"
 
 TARGET_BOT = "@newpayubot"
@@ -16,9 +18,15 @@ TARGET_BOT = "@newpayubot"
 # ─── FLASK APP SETUP ───
 app = Flask(__name__)
 
-# ─── LOGGING SETUP (Suppress Peer Errors) ───
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ─── LOGGING SETUP ───
+logging.basicConfig(
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    stream=sys.stdout
+)
 logger = logging.getLogger(__name__)
+
+# Suppress Pyrogram internal "Peer id invalid" spam
 logging.getLogger("pyrogram").setLevel(logging.CRITICAL)
 
 def handle_exception(loop, context):
@@ -43,12 +51,16 @@ async def get_card_response(cc_number):
     Sends command to bot, waits 5s, fetches and parses response.
     """
     try:
+        logger.info(f"Sending /chk {cc_number} to {TARGET_BOT}...")
+        
         # Send Command
         await pyrogram_client.send_message(TARGET_BOT, f"/chk {cc_number}")
         
+        logger.info("Command sent. Waiting 5 seconds...")
         # Wait 5 Seconds
         await asyncio.sleep(5)
         
+        logger.info("Fetching chat history...")
         # Get History
         async for message in pyrogram_client.get_chat_history(TARGET_BOT, limit=1):
             full_text = message.text or ""
@@ -59,47 +71,59 @@ async def get_card_response(cc_number):
                 if line.strip().startswith("Response:"):
                     extracted = line.split("Response:", 1)[1].strip()
                     break
+            
+            logger.info(f"Raw Bot Response: {extracted}")
             return extracted
             
     except Exception as e:
-        logger.error(f"Error getting response: {e}")
+        logger.error(f"!!! Error in get_card_response: {e}")
+        logger.error(traceback.format_exc())
         return "Error fetching response"
 
 # ─── FLASK ROUTES ───
 
-@app.route('/gate=b3/cc/<cc_details>')
+@app.route('/gate=b3/cc=<cc_details>')
 async def check_gate_b3(cc_details):
-    start_time = time.time()
-    
-    # 1. Get the raw response from the bot
-    raw_response = await get_card_response(cc_details)
-    
-    # 2. Determine Status and Final Response Text
-    final_response_text = raw_response
-    status = "DECLINED"
-    
-    # Logic: "Too many purchase attempts..."
-    if "Too many purchase attempts" in raw_response:
-        final_response_text = "Server Overloaded please wait for few minutes......"
-        status = "DECLINED" # Or "ERROR", depending on preference. Using DECLINED as per "rest status"
+    try:
+        start_time = time.time()
+        logger.info(f"--- New Request ---")
+        logger.info(f"Card Details: {cc_details}")
         
-    # Logic: "Card added"
-    elif "Card added" in raw_response:
-        status = "APPROVED"
-        final_response_text = "Payment method added"
+        # 1. Get the raw response from the bot
+        raw_response = await get_card_response(cc_details)
         
-    # 3. Calculate Time
-    end_time = time.time()
-    duration = f"{end_time - start_time:.2f}s"
-    
-    # 4. Return JSON
-    result = {
-        "response": final_response_text,
-        "status": status,
-        "time": duration
-    }
-    
-    return jsonify(result)
+        # 2. Determine Status and Final Response Text
+        final_response_text = raw_response
+        status = "DECLINED"
+        
+        # Logic: "Too many purchase attempts..."
+        if "Too many purchase attempts" in raw_response:
+            final_response_text = "Server Overloaded please wait for few minutes......"
+            status = "DECLINED"
+            
+        # Logic: "Card added"
+        elif "Card added" in raw_response:
+            status = "APPROVED"
+            final_response_text = "Payment method added"
+            
+        # 3. Calculate Time
+        end_time = time.time()
+        duration = f"{end_time - start_time:.2f}s"
+        
+        # 4. Return JSON
+        result = {
+            "response": final_response_text,
+            "status": status,
+            "time": duration
+        }
+        
+        logger.info(f"Final Result: {result}")
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"!!! SERVER ERROR !!!")
+        logger.error(traceback.format_exc())
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
 
 # ─── MAIN EXECUTION ───
 
@@ -110,10 +134,13 @@ if __name__ == "__main__":
     loop.set_exception_handler(handle_exception)
     
     print("🔌 Starting Pyrogram Client...")
-    # Start Pyrogram synchronously before running Flask
-    # This ensures the user session is active when the first request comes in
-    pyrogram_client.start()
-    print("✅ Pyrogram Connected.")
+    try:
+        # Start Pyrogram synchronously before running Flask
+        pyrogram_client.start()
+        print("✅ Pyrogram Connected.")
+    except Exception as e:
+        print(f"❌ Failed to connect Pyrogram: {e}")
+        sys.exit(1)
     
     print("🚀 Starting Flask API on port 5000...")
     print("📡 Endpoint: /gate=b3/cc={cc|mm|yy|cvv}")
