@@ -139,7 +139,7 @@ def check_gate_b3(cc_details):
         if "Too many purchase attempts" in raw_response:
             final_response_text = "Server Overloaded please wait for few minutes......"
             status = "DECLINED"
-        elif "Card added" in raw_response:
+        elif "Card Added Successfully" in raw_response:
             status = "APPROVED"
             final_response_text = "Payment method added"
         elif "Username not found" in raw_response:
